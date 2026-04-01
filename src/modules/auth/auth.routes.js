@@ -7,6 +7,7 @@ const auth = require('../../middleware/auth');
 
 router.post('/register', validate(registerSchema), controller.register);
 router.post('/login', controller.login);
+router.get('/homepage', controller.homepage);
 
 // Razer OAuth endpoints
 router.get('/razer', controller.redirectToRazer);

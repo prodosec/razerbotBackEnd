@@ -1,5 +1,6 @@
 const authService = require('./auth.service');
 const User = require('./user.model');
+const { chromium } = require('playwright');
 async function register(req, res, next) {
   try {
     const result = await authService.register(req.body);
@@ -17,6 +18,31 @@ async function login(req, res, next) {
     res.status(200).json(result);
   } catch (err) {
     next(err);
+  }
+}
+
+async function homepage(req, res, next) {
+  let browser;
+
+  try {
+    browser = await chromium.launch({ headless: true });
+    const page = await browser.newPage();
+    await page.goto('https://razerid.razer.com/', {
+      waitUntil: 'domcontentloaded',
+      timeout: 60000,
+    });
+
+    res.status(200).json({
+      message: 'Homepage loaded successfully',
+      url: page.url(),
+      title: await page.title(),
+    });
+  } catch (err) {
+    next(err);
+  } finally {
+    if (browser) {
+      await browser.close();
+    }
   }
 }
 
@@ -97,6 +123,7 @@ async function razerCallback(req, res) {
 module.exports = {
   register,
   login,
+  homepage,
   me,
   refresh,
   logout,
