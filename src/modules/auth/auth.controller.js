@@ -9,6 +9,8 @@ async function register(req, res, next) {
   }
 }
 
+
+
 async function login(req, res, next) {
   try {
     const result = await authService.login(req.body);
@@ -29,11 +31,11 @@ async function getLogin(req, res, next) {
 
 async function me(req, res, next) {
   try {
-      const user = await User.findById(req.userId);
+    const user = await User.findById(req.userId);
 
-  res.json({
-    user
-  });
+    res.json({
+      user
+    });
 
   } catch (err) {
     next(err);
@@ -79,11 +81,11 @@ async function razerCallback(req, res) {
     // returning JSON by default; frontend may choose to redirect
     console.log('Razer login successful, user:', result.user);
     res.cookie("auth-token", result.accessToken, {
-  httpOnly: true,
-  secure: false,
-  sameSite: "lax"
-});
-     return res.redirect(
+      httpOnly: true,
+      secure: false,
+      sameSite: "lax"
+    });
+    return res.redirect(
       `${process.env.FRONT_END_URL}/dashboard`
     );
   } catch (err) {
