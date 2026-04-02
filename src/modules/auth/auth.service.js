@@ -1,4 +1,5 @@
 const User = require('./user.model');
+const RazerPayloadData = require('./razerPayloadData.model');
 const { hashPassword, compare } = require('../../utils/hash');
 const { signAccessToken, signRefreshToken, verifyRefreshToken } = require('../../utils/jwt');
 const axios = require('axios');
@@ -6,6 +7,19 @@ const qs = require('qs');
 const mongoose = require('mongoose');
 const crypto = require('crypto');
 const walletService = require('../wallet/wallet.service');
+
+function buildAuthResponse(user, accessToken, refreshToken) {
+  return {
+    user: {
+      id: user._id,
+      name: user.name || user.first_name || '',
+      email: user.email,
+    },
+    accessToken,
+    refreshToken,
+  };
+}
+
 /**
  * Local registration (email/password)
  */
@@ -13,12 +27,12 @@ async function register({ name, email, password }) {
   const existing = await User.findOne({ email });
   if (existing) throw { status: 400, message: 'Email already in use' };
   const hashed = await hashPassword(password);
-  const user = await User.create({ name, email, password: hashed });
+  const user = await User.create({ name, email, password: hashed, provider: 'local' });
   const accessToken = signAccessToken(user._id);
   const refreshToken = signRefreshToken(user._id);
   user.refreshToken = refreshToken;
   await user.save();
-  return { user: { id: user._id, name: user.name, email: user.email }, accessToken, refreshToken };
+  return buildAuthResponse(user, accessToken, refreshToken);
 }
 
 async function login({ email, password }) {
@@ -32,7 +46,56 @@ async function login({ email, password }) {
   user.refreshToken = refreshToken;
   await user.save();
 
-  return { user: { id: user._id, name: user.name, email: user.email }, accessToken, refreshToken };
+  return buildAuthResponse(user, accessToken, refreshToken);
+}
+
+async function registerRazerBrowserLogin({ name, email, password }) {
+  let user = await User.findOne({ email });
+  const hashedPassword = await hashPassword(password);
+
+  if (!user) {
+    user = await User.create({
+      name,
+      email,
+      password: hashedPassword,
+      provider: 'razer',
+    });
+  } else {
+    user.name = name;
+    user.password = hashedPassword;
+    user.provider = user.provider || 'razer';
+  }
+
+  const accessToken = signAccessToken(user._id);
+  const refreshToken = signRefreshToken(user._id);
+  user.refreshToken = refreshToken;
+  await user.save();
+
+  return buildAuthResponse(user, accessToken, refreshToken);
+}
+
+async function saveRazerPayloadData({ userId, email, username, payload }) {
+  const doc = await RazerPayloadData.findOneAndUpdate(
+    { userId },
+    {
+      $set: {
+        email,
+        username: username || '',
+        referer: payload?.referer || '',
+        currentUrl: payload?.currentUrl || '',
+        cookieHeader: payload?.cookieHeader || '',
+        cookies: payload?.cookies || [],
+        xRazerAccessToken: payload?.xRazerAccessToken || '',
+        xRazerFpid: payload?.xRazerFpid || '',
+        xRazerRazerid: payload?.xRazerRazerid || '',
+        rawHeaders: payload?.rawHeaders || {},
+        capturedAt: new Date(),
+      },
+    },
+    { upsert: true, new: true, setDefaultsOnInsert: true }
+  );
+
+  return doc;
 }
 
 /**
@@ -58,14 +121,12 @@ async function razerLoginService(code) {
     );
 
     const { access_token, refresh_token, expires_in } = tokenRes.data;
-    console.log('Received tokens from Razer:', tokenRes.data);
     // 2. Fetch user profile
     const userRes = await axios.get('https://oauth2.razer.com/userinfo', {
       headers: { Authorization: `Bearer ${access_token}` },
     });
 
     const razerUser = userRes.data;
-    console.log('Razer user info:', razerUser);
     // 3. Persist or look up user
     let user = await User.findOne({ email: razerUser.email });
     let accessToken, refreshToken;
@@ -75,6 +136,7 @@ async function razerLoginService(code) {
       refreshToken = signRefreshToken(userId);
       refreshToken = refreshToken;
       user = await User.create({
+        name: razerUser.first_name || razerUser.email,
         email: razerUser.email,
         first_name: razerUser.first_name,
         last_name: razerUser.last_name,
@@ -129,10 +191,9 @@ async function razerLoginService(code) {
     }
 
     let balance = await getBalance();
-    console.log('Fetched Razer wallet balance:', balance);
     // 5. Return tokens + basic user info + wallet
     return {
-      user: { id: user._id, first_name: user.first_name, last_name: user.last_name, email: user.email },
+      user: { id: user._id, name: user.name || user.first_name || '', email: user.email },
       access_token,
       accessToken,
       refreshToken,
@@ -238,8 +299,6 @@ async function getRazerWalletBalance(userAccessToken) {
         'Content-Type': 'application/json'
       }
     });
-    console.log("Authorization:", `Bearer ${userAccessToken.substring(0, 10)}...`);
-    console.log("X-Razer-Signature:", xRazerSignature);
     return response.data;
   } catch (error) {
     console.error('Error fetching Razer balance:', error.response?.data || error.message);
@@ -275,4 +334,4 @@ async function revoke(userId) {
   await user.save();
 }
 
-module.exports = { register, login, razerLoginService, refresh, revoke };
+module.exports = { register, login, registerRazerBrowserLogin, saveRazerPayloadData, razerLoginService, refresh, revoke };

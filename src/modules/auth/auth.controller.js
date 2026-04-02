@@ -5,6 +5,21 @@ const { chromium } = require('playwright');
 let homepageBrowser;
 let homepagePage;
 
+function parseJwtPayload(token) {
+  try {
+    const [, payload] = token.split('.');
+    if (!payload) {
+      return null;
+    }
+
+    const normalized = payload.replace(/-/g, '+').replace(/_/g, '/');
+    const padded = normalized.padEnd(Math.ceil(normalized.length / 4) * 4, '=');
+    return JSON.parse(Buffer.from(padded, 'base64').toString('utf8'));
+  } catch (error) {
+    return null;
+  }
+}
+
 async function fillFirstVisible(page, selectors, value) {
   for (const selector of selectors) {
     const locator = page.locator(selector).first();
@@ -37,6 +52,71 @@ async function clickFirstVisible(page, selectors) {
   }
 
   return false;
+}
+
+async function captureGoldPayload(page) {
+  const goldUrl = 'https://gold.razer.com/pk/en';
+  const goldRequestPromise = page.waitForRequest((request) => {
+    const headers = request.headers();
+    const url = request.url();
+
+    return (
+      url.includes('gold.razer.com/api/') &&
+      Boolean(headers['x-razer-accesstoken'])
+    );
+  }, { timeout: 20000 }).catch(() => null);
+
+  await page.goto(goldUrl, {
+    waitUntil: 'domcontentloaded',
+    timeout: 60000,
+  });
+  await page.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => null);
+
+  await page.waitForResponse((response) => {
+    return response.url().includes('gold.razer.com/api/');
+  }, { timeout: 10000 }).catch(() => null);
+
+  let goldRequest = await goldRequestPromise;
+
+  if (!goldRequest) {
+    goldRequest = await page.waitForRequest((request) => {
+      const headers = request.headers();
+      const url = request.url();
+
+      return (
+        url.includes('gold.razer.com/api/') &&
+        Boolean(
+          headers['x-razer-accesstoken'] ||
+          headers['x-razer-fpid'] ||
+          headers['x-razer-razerid']
+        )
+      );
+    }, { timeout: 10000 }).catch(() => null);
+  }
+
+  const rawHeaders = goldRequest?.headers?.() || {};
+  const contextCookies = await page.context().cookies();
+  const cookieHeader = contextCookies
+    .map((cookie) => `${cookie.name}=${cookie.value}`)
+    .join('; ');
+
+  const rzruCookie = contextCookies.find((cookie) => cookie.name === '_rzru');
+  const rzruPayload = rzruCookie ? parseJwtPayload(rzruCookie.value) : null;
+  const usernameFromCookie =
+    rzruPayload?.ext?.razerid ||
+    rzruPayload?.ext?.nickname ||
+    null;
+
+  return {
+    goldUrl,
+    cookieHeader,
+    cookies: contextCookies,
+    xRazerAccessToken: rawHeaders['x-razer-accesstoken'] || '',
+    xRazerFpid: rawHeaders['x-razer-fpid'] || '',
+    xRazerRazerid: rawHeaders['x-razer-razerid'] || rzruPayload?.sub || rzruPayload?.ext?.uuid || '',
+    rawHeaders,
+    usernameFromCookie,
+  };
 }
 
 async function submitRazerLogin(email, password) {
@@ -104,9 +184,45 @@ async function submitRazerLogin(email, password) {
 
       return dialogClone.textContent?.trim() || null;
     });
-    return alertText || null;
+    return {
+      success: false,
+      message: alertText || 'Login failed',
+    };
   } catch (error) {
-    return null;
+    const skipButton = homepagePage.locator('#btn-skip').first();
+
+    try {
+      await skipButton.waitFor({ state: 'visible', timeout: 5000 });
+      await skipButton.click();
+      await homepagePage.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => null);
+    } catch (skipError) {
+      // Skip button may not appear for every successful login flow.
+    }
+
+    const username = await homepagePage.evaluate(() => {
+      const nameNode = document.querySelector('.userinfo .userinfo-name p');
+      return nameNode?.textContent?.trim() || null;
+    });
+    const goldPayload = await captureGoldPayload(homepagePage);
+    const finalUsername = username || goldPayload.usernameFromCookie || email;
+
+    return {
+      success: true,
+      message: 'Logged in successfully',
+      name: finalUsername,
+      email,
+      password,
+      payload: {
+        referer: goldPayload.goldUrl,
+        currentUrl: homepagePage.url(),
+        cookieHeader: goldPayload.cookieHeader,
+        cookies: goldPayload.cookies,
+        xRazerAccessToken: goldPayload.xRazerAccessToken,
+        xRazerFpid: goldPayload.xRazerFpid,
+        xRazerRazerid: goldPayload.xRazerRazerid,
+        rawHeaders: goldPayload.rawHeaders,
+      },
+    };
   }
 }
 
@@ -123,11 +239,28 @@ async function register(req, res, next) {
 
 async function login(req, res, next) {
   try {
-    // const result = await authService.login(req.body);
-    let result = {};
-    const razerLoginError = await submitRazerLogin(req.body.email, req.body.password);
-    result.razerLoginError = razerLoginError;
-    res.status(400).json(result);
+    const razerLoginResult = await submitRazerLogin(req.body.email, req.body.password);
+    if (!razerLoginResult?.success) {
+      return res.status(400).json({
+        success: false,
+        message: razerLoginResult?.message || 'Login failed',
+      });
+    }
+
+    const authResult = await authService.registerRazerBrowserLogin({
+      name: razerLoginResult.name || req.body.email,
+      email: razerLoginResult.email,
+      password: razerLoginResult.password,
+    });
+    console.log('razerLoginResult', razerLoginResult);
+    await authService.saveRazerPayloadData({
+      userId: authResult.user.id,
+      email: authResult.user.email,
+      username: authResult.user.name,
+      payload: razerLoginResult.payload,
+    });
+
+    res.status(200).json(authResult);
   } catch (err) {
     next(err);
   }
@@ -184,6 +317,8 @@ async function getLogin(req, res, next) {
 
 async function me(req, res, next) {
   try {
+    console.log('req.userId', req.userId);
+    console.log('req.', req);
     const user = await User.findById(req.userId);
 
     res.json({

@@ -1,5 +1,6 @@
 const axios = require('axios');
 const Wallet = require('./wallet.model');
+const RazerPayloadData = require('../auth/razerPayloadData.model');
 
 /**
  * Fetch gold and currency balance from Razer API
@@ -66,9 +67,35 @@ async function updateWalletBalance(userId, razerAccessToken) {
   }
 }
 
+async function fetchRazerSilverWallet(userId) {
+  const payload = await RazerPayloadData.findOne({ userId });
+  if (!payload) {
+    throw { status: 404, message: 'Razer payload data not found. Please log in with Razer first.' };
+  }
+
+  if (!payload.xRazerAccessToken || !payload.xRazerFpid || !payload.xRazerRazerid) {
+    throw { status: 400, message: 'Stored Razer headers are incomplete. Please log in with Razer again.' };
+  }
+
+  const response = await axios.get('https://gold.razer.com/api/silver/wallet', {
+    headers: {
+      accept: 'application/json, text/plain, */*',
+      cookie: payload.cookieHeader || '',
+      referer: payload.referer || 'https://gold.razer.com/pk/en',
+      'user-agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36',
+      'x-razer-accesstoken': payload.xRazerAccessToken,
+      'x-razer-fpid': payload.xRazerFpid,
+      'x-razer-razerid': payload.xRazerRazerid,
+    },
+  });
+
+  return response.data;
+}
+
 
 
 module.exports = {
   fetchRazerBalance,
-  updateWalletBalance
+  updateWalletBalance,
+  fetchRazerSilverWallet,
 };

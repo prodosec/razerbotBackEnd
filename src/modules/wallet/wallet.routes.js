@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const walletController = require('./wallet.controller');
-// const { authenticateToken } = require('../../middleware/auth');
+const auth = require('../../middleware/auth');
 
 /**
  * @route GET /api/wallet/balance
@@ -14,7 +14,7 @@ const walletController = require('./wallet.controller');
  * @desc Refresh wallet balance from Razer API
  * @access Private
  */
-// router.post('/refresh', authenticateToken, walletController.refreshBalance);
+router.get('/silver', auth, walletController.getSilverWallet);
 
 /**
  * @route GET /api/wallet/summary

@@ -32,8 +32,23 @@ async function refreshBalance(req, res, next) {
   }
 }
 
+async function getSilverWallet(req, res, next) {
+  try {
+    const data = await walletService.fetchRazerSilverWallet(req.userId);
+
+    return res.json({
+      success: true,
+      message: 'Silver wallet fetched successfully',
+      data,
+    });
+  } catch (err) {
+    next(err);
+  }
+}
+
 
 
 module.exports = {
-  refreshBalance
+  refreshBalance,
+  getSilverWallet,
 };
