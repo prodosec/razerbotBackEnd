@@ -1,5 +1,4 @@
 const jwt = require('jsonwebtoken');
-const User = require('../modules/auth/user.model');
 
 async function auth(req, res, next) {
   try {
@@ -11,23 +10,28 @@ async function auth(req, res, next) {
     // const user = await User.findById(payload.sub).select('-password');
     // if (!user) return res.status(401).json({ message: 'Unauthorized' });
     // req.user = user;
-     const token = req.cookies['auth-token'];
+    const token = req.cookies['auth-token'];
 
-  if (!token) {
-    return res.status(401).json({
-      message: "Unauthorized"
-    });
-  }
+    if (!token) {
+      return res.status(401).json({
+        message: "Unauthorized"
+      });
+    }
 
-  const decoded = jwt.verify(
-    token,
-    process.env.JWT_ACCESS_SECRET
-  );
-console.log('Decoded JWT:', decoded);
-  req.userId = decoded.sub;
+    const decoded = jwt.verify(
+      token,
+      process.env.JWT_ACCESS_SECRET
+    );
+    req.userId = decoded.sub;
 
-  next();
+    next();
   } catch (err) {
+    if (err.name === 'TokenExpiredError' || err.name === 'JsonWebTokenError') {
+      return res.status(401).json({
+        message: 'Unauthorized',
+      });
+    }
+
     next(err);
   }
 }

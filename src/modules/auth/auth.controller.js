@@ -5,6 +5,8 @@ const { chromium } = require('playwright');
 let homepageBrowser;
 let homepagePage;
 
+const DEFAULT_RAZER_GOLD_URL = process.env.RAZER_GOLD_URL || 'https://gold.razer.com/pk/en';
+
 function parseJwtPayload(token) {
   try {
     const [, payload] = token.split('.');
@@ -55,7 +57,7 @@ async function clickFirstVisible(page, selectors) {
 }
 
 async function captureGoldPayload(page) {
-  const goldUrl = 'https://gold.razer.com/pk/en';
+  const goldUrl = DEFAULT_RAZER_GOLD_URL;
   const goldRequestPromise = page.waitForRequest((request) => {
     const headers = request.headers();
     const url = request.url();
@@ -66,10 +68,24 @@ async function captureGoldPayload(page) {
     );
   }, { timeout: 20000 }).catch(() => null);
 
-  await page.goto(goldUrl, {
-    waitUntil: 'domcontentloaded',
-    timeout: 60000,
-  });
+  try {
+    await page.goto(goldUrl, {
+      waitUntil: 'domcontentloaded',
+      timeout: 60000,
+    });
+  } catch (error) {
+    if (error?.message?.includes('ERR_NAME_NOT_RESOLVED')) {
+      throw {
+        status: 502,
+        message: `Unable to resolve Razer Gold host while opening ${goldUrl}. Check DNS/network access on the server or set RAZER_GOLD_URL to a reachable Razer Gold page.`,
+      };
+    }
+
+    throw {
+      status: 502,
+      message: `Failed to open Razer Gold page ${goldUrl}: ${error.message}`,
+    };
+  }
   await page.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => null);
 
   await page.waitForResponse((response) => {
@@ -262,6 +278,10 @@ async function login(req, res, next) {
 
     res.status(200).json(authResult);
   } catch (err) {
+    if (err?.status && err?.message) {
+      return next(err);
+    }
+
     next(err);
   }
 }

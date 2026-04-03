@@ -1,5 +1,7 @@
 const User = require('./user.model');
 const RazerPayloadData = require('./razerPayloadData.model');
+
+const DEFAULT_RAZER_GOLD_URL = process.env.RAZER_GOLD_URL || 'https://gold.razer.com/pk/en';
 const { hashPassword, compare } = require('../../utils/hash');
 const { signAccessToken, signRefreshToken, verifyRefreshToken } = require('../../utils/jwt');
 const axios = require('axios');
@@ -179,7 +181,7 @@ async function razerLoginService(code) {
               "x-razer-fpid": "razerid.razer.com",
               "x-razer-razerid": razerUser.open_id,
               "cookie": "",
-              "referer": "https://gold.razer.com/pk/en",
+              "referer": DEFAULT_RAZER_GOLD_URL,
 
             }
           }

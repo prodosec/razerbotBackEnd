@@ -2,6 +2,8 @@ const axios = require('axios');
 const Wallet = require('./wallet.model');
 const RazerPayloadData = require('../auth/razerPayloadData.model');
 
+const DEFAULT_RAZER_GOLD_URL = process.env.RAZER_GOLD_URL || 'https://gold.razer.com/pk/en';
+
 /**
  * Fetch gold and currency balance from Razer API
  */
@@ -20,7 +22,7 @@ async function fetchRazerBalance(razerAccessToken) {
     );
 
     console.log('Razer wallet response:', response.data);
-    
+
     return {
       gold: response.data?.gold || 0,
       currency: response.data?.currency || 0,
@@ -45,7 +47,7 @@ async function fetchRazerBalance(razerAccessToken) {
 async function updateWalletBalance(userId, razerAccessToken) {
   try {
     const balanceData = await fetchRazerBalance(razerAccessToken);
-    
+
     let wallet = await Wallet.findOneAndUpdate(
       { userId },
       {
@@ -67,7 +69,7 @@ async function updateWalletBalance(userId, razerAccessToken) {
   }
 }
 
-async function fetchRazerSilverWallet(userId) {
+async function fetchRazerWalletBalances(userId) {
   const payload = await RazerPayloadData.findOne({ userId });
   if (!payload) {
     throw { status: 404, message: 'Razer payload data not found. Please log in with Razer first.' };
@@ -77,19 +79,25 @@ async function fetchRazerSilverWallet(userId) {
     throw { status: 400, message: 'Stored Razer headers are incomplete. Please log in with Razer again.' };
   }
 
-  const response = await axios.get('https://gold.razer.com/api/silver/wallet', {
-    headers: {
-      accept: 'application/json, text/plain, */*',
-      cookie: payload.cookieHeader || '',
-      referer: payload.referer || 'https://gold.razer.com/pk/en',
-      'user-agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36',
-      'x-razer-accesstoken': payload.xRazerAccessToken,
-      'x-razer-fpid': payload.xRazerFpid,
-      'x-razer-razerid': payload.xRazerRazerid,
-    },
-  });
+  const headers = {
+    accept: 'application/json, text/plain, */*',
+    cookie: payload.cookieHeader || '',
+    referer: payload.referer || DEFAULT_RAZER_GOLD_URL,
+    'user-agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36',
+    'x-razer-accesstoken': payload.xRazerAccessToken,
+    'x-razer-fpid': payload.xRazerFpid,
+    'x-razer-razerid': payload.xRazerRazerid,
+  };
 
-  return response.data;
+  const [responseSilver, responseGold] = await Promise.all([
+    axios.get('https://gold.razer.com/api/silver/wallet', { headers }),
+    axios.get('https://gold.razer.com/api/gold/balance', { headers }),
+  ]);
+
+  return {
+    silver: responseSilver.data,
+    gold: responseGold.data,
+  };
 }
 
 
@@ -97,5 +105,5 @@ async function fetchRazerSilverWallet(userId) {
 module.exports = {
   fetchRazerBalance,
   updateWalletBalance,
-  fetchRazerSilverWallet,
+  fetchRazerWalletBalances,
 };

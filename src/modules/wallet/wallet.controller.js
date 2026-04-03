@@ -9,14 +9,14 @@ async function refreshBalance(req, res, next) {
     const razerAccessToken = req.user.accessToken_razer;
 
     if (!razerAccessToken) {
-      return res.status(400).json({ 
-        success: false, 
-        message: 'Razer access token not found. Please log in with Razer.' 
+      return res.status(400).json({
+        success: false,
+        message: 'Razer access token not found. Please log in with Razer.'
       });
     }
 
     const wallet = await walletService.updateWalletBalance(userId, razerAccessToken);
-   return res.json({
+    return res.json({
       success: true,
       message: 'Balance refreshed successfully',
       data: {
@@ -34,7 +34,7 @@ async function refreshBalance(req, res, next) {
 
 async function getSilverWallet(req, res, next) {
   try {
-    const data = await walletService.fetchRazerSilverWallet(req.userId);
+    const data = await walletService.fetchRazerWalletBalances(req.userId);
 
     return res.json({
       success: true,
