@@ -56,6 +56,57 @@ async function clickFirstVisible(page, selectors) {
   return false;
 }
 
+async function enableAndSubmitLogin(page) {
+  const submitSelectors = [
+    '#btn-log-in',
+    'button.login-btn-landscape',
+    'button[type="submit"]',
+    'input[type="submit"]',
+  ];
+
+  await page.evaluate((selectors) => {
+    selectors.forEach((selector) => {
+      const submitButton = document.querySelector(selector);
+      if (!submitButton) {
+        return;
+      }
+
+      submitButton.removeAttribute('disabled');
+      submitButton.disabled = false;
+    });
+  }, submitSelectors);
+
+  const submitted = await clickFirstVisible(page, submitSelectors);
+  if (!submitted) {
+    throw {
+      status: 400,
+      message: 'Unable to find a visible login submit button after filling the form.',
+    };
+  }
+}
+
+async function handlePostLoginPrompts(page) {
+  const acceptButton = page.locator('#btn-accept').first();
+
+  try {
+    await acceptButton.waitFor({ state: 'visible', timeout: 5000 });
+    await acceptButton.click();
+    await page.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => null);
+  } catch (acceptError) {
+    // Agreement screen may not appear for every successful login flow.
+  }
+
+  const skipButton = page.locator('#btn-skip').first();
+
+  try {
+    await skipButton.waitFor({ state: 'visible', timeout: 5000 });
+    await skipButton.click();
+    await page.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => null);
+  } catch (skipError) {
+    // Skip button may not appear for every successful login flow.
+  }
+}
+
 async function captureGoldPayload(page) {
   const goldUrl = DEFAULT_RAZER_GOLD_URL;
   const goldRequestPromise = page.waitForRequest((request) => {
@@ -137,49 +188,67 @@ async function captureGoldPayload(page) {
 
 async function submitRazerLogin(email, password) {
   if (!homepagePage) {
-    return null;
+    throw {
+      status: 400,
+      message: 'Homepage is not initialized. Open /api/auth/homepage before submitting login.',
+    };
   }
 
-  const emailInput = homepagePage.locator('#input-login-email');
-  const passwordInput = homepagePage.locator('#input-login-password');
-  const loginButton = homepagePage.locator('#btn-log-in');
+  const emailSelectors = [
+    '#input-login-email',
+    'input[type="email"]',
+    'input[name="email"]',
+    'input[name="username"]',
+  ];
+  const passwordSelectors = [
+    '#input-login-password',
+    'input[type="password"]',
+    'input[name="password"]',
+  ];
 
-  await emailInput.waitFor({ state: 'visible', timeout: 10000 });
-  await emailInput.fill(email);
-  await emailInput.dispatchEvent('input');
-  await emailInput.dispatchEvent('change');
+  const emailFilled = await fillFirstVisible(homepagePage, emailSelectors, email);
+  if (!emailFilled) {
+    throw {
+      status: 400,
+      message: 'Unable to find the email field on the Razer login form.',
+    };
+  }
 
-  await passwordInput.waitFor({ state: 'visible', timeout: 10000 });
-  await homepagePage.evaluate((passwordValue) => {
-    const passwordField = document.querySelector('#input-login-password');
-    if (!passwordField) {
-      return;
+  const passwordFilled = await homepagePage.evaluate(({ selectors, passwordValue }) => {
+    for (const selector of selectors) {
+      const passwordField = document.querySelector(selector);
+      if (!passwordField) {
+        continue;
+      }
+
+      passwordField.removeAttribute('readonly');
+      passwordField.readOnly = false;
+
+      const prototype = Object.getPrototypeOf(passwordField);
+      const valueSetter = Object.getOwnPropertyDescriptor(prototype, 'value')?.set;
+      if (valueSetter) {
+        valueSetter.call(passwordField, passwordValue);
+      } else {
+        passwordField.value = passwordValue;
+      }
+
+      passwordField.dispatchEvent(new Event('input', { bubbles: true }));
+      passwordField.dispatchEvent(new Event('change', { bubbles: true }));
+      return true;
     }
 
-    passwordField.removeAttribute('readonly');
-    passwordField.readOnly = false;
+    return false;
+  }, { selectors: passwordSelectors, passwordValue: password });
 
-    const prototype = Object.getPrototypeOf(passwordField);
-    const valueSetter = Object.getOwnPropertyDescriptor(prototype, 'value')?.set;
-    if (valueSetter) {
-      valueSetter.call(passwordField, passwordValue);
-    } else {
-      passwordField.value = passwordValue;
-    }
-
-    passwordField.dispatchEvent(new Event('input', { bubbles: true }));
-    passwordField.dispatchEvent(new Event('change', { bubbles: true }));
-  }, password);
+  if (!passwordFilled) {
+    throw {
+      status: 400,
+      message: 'Unable to find the password field on the Razer login form.',
+    };
+  }
 
   await homepagePage.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => null);
-
-  await homepagePage.evaluate(() => {
-    const submitButton = document.querySelector('#btn-log-in');
-    if (submitButton) {
-      submitButton.removeAttribute('disabled');
-    }
-  });
-  await loginButton.click();
+  await enableAndSubmitLogin(homepagePage);
 
   await homepagePage.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => null);
 
@@ -205,20 +274,13 @@ async function submitRazerLogin(email, password) {
       message: alertText || 'Login failed',
     };
   } catch (error) {
-    const skipButton = homepagePage.locator('#btn-skip').first();
-
-    try {
-      await skipButton.waitFor({ state: 'visible', timeout: 5000 });
-      await skipButton.click();
-      await homepagePage.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => null);
-    } catch (skipError) {
-      // Skip button may not appear for every successful login flow.
-    }
+    await handlePostLoginPrompts(homepagePage);
 
     const username = await homepagePage.evaluate(() => {
       const nameNode = document.querySelector('.userinfo .userinfo-name p');
       return nameNode?.textContent?.trim() || null;
     });
+    console.log('Logged in username detected on homepage:', username);
     const goldPayload = await captureGoldPayload(homepagePage);
     const finalUsername = username || goldPayload.usernameFromCookie || email;
 
@@ -257,6 +319,7 @@ async function login(req, res, next) {
   try {
     const razerLoginResult = await submitRazerLogin(req.body.email, req.body.password);
     if (!razerLoginResult?.success) {
+      console.log('Razer login failed:', razerLoginResult?.message);
       return res.status(400).json({
         success: false,
         message: razerLoginResult?.message || 'Login failed',

@@ -4,6 +4,27 @@ const RazerPayloadData = require('../auth/razerPayloadData.model');
 
 const DEFAULT_RAZER_GOLD_URL = process.env.RAZER_GOLD_URL || 'https://gold.razer.com/pk/en';
 
+async function getStoredRazerHeaders(userId) {
+  const payload = await RazerPayloadData.findOne({ userId });
+  if (!payload) {
+    throw { status: 404, message: 'Razer payload data not found. Please log in with Razer first.' };
+  }
+
+  if (!payload.xRazerAccessToken || !payload.xRazerFpid || !payload.xRazerRazerid) {
+    throw { status: 400, message: 'Stored Razer headers are incomplete. Please log in with Razer again.' };
+  }
+
+  return {
+    accept: 'application/json, text/plain, */*',
+    cookie: payload.cookieHeader || '',
+    referer: payload.referer || DEFAULT_RAZER_GOLD_URL,
+    'user-agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36',
+    'x-razer-accesstoken': payload.xRazerAccessToken,
+    'x-razer-fpid': payload.xRazerFpid,
+    'x-razer-razerid': payload.xRazerRazerid,
+  };
+}
+
 /**
  * Fetch gold and currency balance from Razer API
  */
@@ -70,24 +91,7 @@ async function updateWalletBalance(userId, razerAccessToken) {
 }
 
 async function fetchRazerWalletBalances(userId) {
-  const payload = await RazerPayloadData.findOne({ userId });
-  if (!payload) {
-    throw { status: 404, message: 'Razer payload data not found. Please log in with Razer first.' };
-  }
-
-  if (!payload.xRazerAccessToken || !payload.xRazerFpid || !payload.xRazerRazerid) {
-    throw { status: 400, message: 'Stored Razer headers are incomplete. Please log in with Razer again.' };
-  }
-
-  const headers = {
-    accept: 'application/json, text/plain, */*',
-    cookie: payload.cookieHeader || '',
-    referer: payload.referer || DEFAULT_RAZER_GOLD_URL,
-    'user-agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36',
-    'x-razer-accesstoken': payload.xRazerAccessToken,
-    'x-razer-fpid': payload.xRazerFpid,
-    'x-razer-razerid': payload.xRazerRazerid,
-  };
+  const headers = await getStoredRazerHeaders(userId);
 
   const [responseSilver, responseGold] = await Promise.all([
     axios.get('https://gold.razer.com/api/silver/wallet', { headers }),
@@ -106,4 +110,5 @@ module.exports = {
   fetchRazerBalance,
   updateWalletBalance,
   fetchRazerWalletBalances,
+  getStoredRazerHeaders,
 };
