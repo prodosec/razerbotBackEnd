@@ -8,6 +8,7 @@
     "dev": "nodemon --watch src --exec node src/index.js"
   },
   "dependencies": {
+    "@socket.io/redis-adapter": "^8.3.0",
     "axios": "^1.13.6",
     "bcryptjs": "^2.4.3",
     "cookie-parser": "^1.4.7",
@@ -17,7 +18,9 @@
     "joi": "^17.9.2",
     "jsonwebtoken": "^9.0.3",
     "mongoose": "^7.3.1",
-    "playwright": "^1.59.0"
+    "playwright": "^1.59.0",
+    "redis": "^5.8.2",
+    "socket.io": "^4.8.1"
   },
   "devDependencies": {
     "nodemon": "^2.0.22"
