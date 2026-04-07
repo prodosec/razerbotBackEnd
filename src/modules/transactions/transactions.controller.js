@@ -231,8 +231,47 @@ async function stopBatch(req, res, next) {
   }
 }
 
+async function getTransactionHistory(req, res, next) {
+  try {
+    const razerPayload = await RazerPayloadData.findOne({ userId: req.userId });
+    if (!razerPayload || !razerPayload.xRazerAccessToken) {
+      return res.status(400).json({
+        success: false,
+        message: 'Razer session not found. Please log in with Razer first.',
+      });
+    }
+
+    const response = await fetch('https://gold.razer.com/api/transactions/history', {
+      method: 'GET',
+      headers: {
+        'accept': 'application/json, text/plain, */*',
+        'accept-language': 'en-US,en;q=0.9',
+        'cache-control': 'no-cache',
+        'pragma': 'no-cache',
+        'x-razer-accesstoken': razerPayload.xRazerAccessToken,
+        'x-razer-fpid': razerPayload.xRazerFpid,
+        'x-razer-razerid': razerPayload.xRazerRazerid,
+        'cookie': razerPayload.cookieHeader,
+        'Referer': 'https://gold.razer.com/global/en/transactions',
+      },
+    });
+
+    const data = await response.json();
+    console.log('Transaction history response:', data);
+
+    return res.json({
+      success: true,
+      message: 'Transaction history fetched successfully',
+      data,
+    });
+  } catch (err) {
+    next(err);
+  }
+}
+
 module.exports = {
   generateOTP,
+  getTransactionHistory,
   startBatch,
   getBatchStatus,
   pauseBatch,
