@@ -90,6 +90,7 @@ async function saveRazerPayloadData({ userId, email, username, payload }) {
         xRazerAccessToken: payload?.xRazerAccessToken || '',
         xRazerFpid: payload?.xRazerFpid || '',
         xRazerRazerid: payload?.xRazerRazerid || '',
+        razerIdAuthToken: payload?.razerIdAuthToken || '',
         rawHeaders: payload?.rawHeaders || {},
         capturedAt: new Date(),
       },

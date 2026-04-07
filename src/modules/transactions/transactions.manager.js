@@ -2,7 +2,7 @@ const crypto = require('crypto');
 const { emitTransactionEvent } = require('./transactions.events');
 
 const MAX_CONCURRENCY = 10;
-const ALLOWED_MODES = new Set(['fake', 'mongodb']);
+const ALLOWED_MODES = new Set(['fake', 'mongodb', 'razer']);
 
 class TransactionsManager {
   constructor() {

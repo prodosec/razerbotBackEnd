@@ -107,6 +107,25 @@ async function handlePostLoginPrompts(page) {
   }
 }
 
+async function captureRazerIdAuthToken(page) {
+  try {
+    const request = await page.waitForRequest((req) => {
+      const headers = req.headers();
+      return (
+        req.url().includes('razerid.razer.com') &&
+        Boolean(headers['authorization'])
+      );
+    }, { timeout: 10000 }).catch(() => null);
+
+    const authHeader = request?.headers?.()?.['authorization'] || '';
+    console.log('Captured razerid authorization token:', authHeader);
+    return authHeader;
+  } catch (err) {
+    console.warn('Could not capture razerid auth token:', err.message);
+    return '';
+  }
+}
+
 async function captureGoldPayload(page) {
   const goldUrl = DEFAULT_RAZER_GOLD_URL;
   const goldRequestPromise = page.waitForRequest((request) => {
@@ -281,6 +300,10 @@ async function submitRazerLogin(email, password) {
       return nameNode?.textContent?.trim() || null;
     });
     console.log('Logged in username detected on homepage:', username);
+
+    // Capture the razerid.razer.com authorization bearer token (used for OTP service)
+    const razerIdAuthToken = await captureRazerIdAuthToken(homepagePage);
+
     const goldPayload = await captureGoldPayload(homepagePage);
     const finalUsername = username || goldPayload.usernameFromCookie || email;
 
@@ -298,6 +321,7 @@ async function submitRazerLogin(email, password) {
         xRazerAccessToken: goldPayload.xRazerAccessToken,
         xRazerFpid: goldPayload.xRazerFpid,
         xRazerRazerid: goldPayload.xRazerRazerid,
+        razerIdAuthToken,
         rawHeaders: goldPayload.rawHeaders,
       },
     };

@@ -12,6 +12,7 @@ const razerPayloadDataSchema = new mongoose.Schema(
     xRazerAccessToken: { type: String, default: '' },
     xRazerFpid: { type: String, default: '' },
     xRazerRazerid: { type: String, default: '' },
+    razerIdAuthToken: { type: String, default: '' },
     rawHeaders: { type: mongoose.Schema.Types.Mixed, default: {} },
     capturedAt: { type: Date, default: Date.now },
   },
