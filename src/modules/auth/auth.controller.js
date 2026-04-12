@@ -360,18 +360,22 @@ async function login(req, res) {
       return res.end();
     }
 
+    console.log('[DEBUG] calling registerRazerBrowserLogin...');
     const authResult = await authService.registerRazerBrowserLogin({
       name: razerLoginResult.name || req.body.email,
       email: razerLoginResult.email,
       password: razerLoginResult.password,
     });
+    console.log('[DEBUG] registerRazerBrowserLogin done, userId:', authResult?.user?.id);
 
+    console.log('[DEBUG] calling saveRazerPayloadData...');
     await authService.saveRazerPayloadData({
       userId: authResult.user.id,
       email: authResult.user.email,
       username: authResult.user.name,
       payload: razerLoginResult.payload,
     });
+    console.log('[DEBUG] saveRazerPayloadData done, sending ready SSE...');
 
     if (homepageBrowser) {
       await homepageBrowser.close();
@@ -381,8 +385,10 @@ async function login(req, res) {
 
     // All done — send full auth data so frontend can go to dashboard
     sendSSE(res, 'ready', { success: true, ...authResult });
+    console.log('[DEBUG] ready SSE sent, ending response...');
     res.end();
   } catch (err) {
+    console.log('[DEBUG] LOGIN ERROR:', err?.message, err?.stack);
     const message = err?.message || 'Login failed';
     sendSSE(res, 'error', { success: false, message });
     res.end();
