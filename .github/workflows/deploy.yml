@@ -19,4 +19,4 @@ jobs:
             cd /root/razerbotBackEnd
             git pull origin main
             npm install
-            pm2 restart app
+            pm2 restart razerv2-backend
