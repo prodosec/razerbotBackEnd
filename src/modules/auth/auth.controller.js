@@ -389,19 +389,19 @@ async function homepage(req, res, next) {
   console.log('Homepage loaded');
 
   try {
-    if (homepageBrowser && homepagePage) {
-      await homepagePage.goto('https://razerid.razer.com/', {
-        waitUntil: 'domcontentloaded',
-        timeout: 60000,
-      });
-    } else {
-      homepageBrowser = await chromium.launch({ headless: true });
+    // if (homepageBrowser && homepagePage) {
+    //   await homepagePage.goto('https://razerid.razer.com/', {
+    //     waitUntil: 'domcontentloaded',
+    //     timeout: 60000,
+    //   });
+    // } else {
+      homepageBrowser = await chromium.launch({ headless: false });
       homepagePage = await homepageBrowser.newPage();
       await homepagePage.goto('https://razerid.razer.com/', {
         waitUntil: 'domcontentloaded',
         timeout: 60000,
       });
-    }
+    // }
 
     await homepagePage.waitForLoadState('networkidle', { timeout: 60000 }).catch(() => null);
     await homepagePage.bringToFront();
