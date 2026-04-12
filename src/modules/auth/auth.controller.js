@@ -118,6 +118,7 @@ async function captureRazerIdAuthToken(page) {
 
 async function captureGoldPayload(page) {
   const goldUrl = DEFAULT_RAZER_GOLD_URL;
+  console.log('[DEBUG] captureGoldPayload navigating to:', goldUrl);
   const goldRequestPromise = page.waitForRequest((request) => {
     const headers = request.headers();
     const url = request.url();
@@ -256,8 +257,9 @@ async function submitRazerLogin(email, password, onLoginDetected) {
   await enableAndSubmitLogin(homepagePage);
 
   await homepagePage.waitForLoadState('load', { timeout: 5000 }).catch(() => null);
-
+console.log('Login submitted, checking for errors or successful login...');
   const alertBox = homepagePage.locator('#main-alert.show.error.notification .dialog').first();
+ console.log('Waiting for potential login error alert...');
   try {
     await alertBox.waitFor({ state: 'visible', timeout: 3000 });
     const alertText = await homepagePage.evaluate(() => {
@@ -291,11 +293,13 @@ async function submitRazerLogin(email, password, onLoginDetected) {
     if (onLoginDetected) {
       await onLoginDetected();
     }
-
+    console.log('[DEBUG] onLoginDetected done, now capturing razerIdAuthToken...');
     // Capture the razerid.razer.com authorization bearer token (used for OTP service)
     const razerIdAuthToken = await razerIdAuthTokenPromise;
+    console.log('[DEBUG] razerIdAuthToken done, now starting captureGoldPayload...');
 
     const goldPayload = await captureGoldPayload(homepagePage);
+    console.log('[DEBUG] captureGoldPayload done, accessToken:', goldPayload.xRazerAccessToken ? 'found' : 'missing');
     const finalUsername = username || goldPayload.usernameFromCookie || email;
 
     return {
