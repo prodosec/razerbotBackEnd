@@ -11,4 +11,5 @@ router.post('/batches/:jobId/resume', auth, transactionsController.resumeBatch);
 router.post('/batches/:jobId/stop', auth, transactionsController.stopBatch);
 router.post('/otp/generate', auth, transactionsController.generateOTP);
 router.get('/history', auth, transactionsController.getTransactionHistory);
+router.get('/progress', auth, transactionsController.getProgress);
 module.exports = router;

@@ -1,4 +1,5 @@
 const TransactionBatchTest = require('./transactionTest.model');
+const CompletedBatch = require('./completedBatch.model');
 const { TransactionsManager, MAX_CONCURRENCY, ALLOWED_MODES } = require('./transactions.manager');
 const RazerPayloadData = require('../auth/razerPayloadData.model');
 
@@ -69,12 +70,43 @@ async function processWithMongoMode({ jobId, userId, itemIndex, payload }) {
 }
 
 async function processWithRazerMode({ userId, itemIndex, payload }) {
+  const tag = `[razer][item ${itemIndex}]`;
+
+  console.log(`${tag} ── START ──────────────────────────────`);
+  console.log(`${tag} userId:`, userId);
+  console.log(`${tag} payload:`, JSON.stringify(payload, null, 2));
+
+  const missingOtpFields = ['otp_token', 'rzrotptoken', 'rzrotptokenTs', 'otp_token_enc'].filter(
+    (f) => !payload[f] || String(payload[f]).trim() === ''
+  );
+  if (missingOtpFields.length > 0) {
+    const msg = `Missing or empty OTP fields: ${missingOtpFields.join(', ')}. Please generate OTP first.`;
+    console.error(`${tag} ERROR:`, msg);
+    throw new Error(msg);
+  }
+
   // Load saved Razer headers for this user
-  const razerPayload = await RazerPayloadData.findOne({ userId });
+  let razerPayload;
+  try {
+    razerPayload = await RazerPayloadData.findOne({ userId });
+  } catch (dbErr) {
+    console.error(`${tag} ERROR: DB lookup for RazerPayloadData failed:`, dbErr.message);
+    throw dbErr;
+  }
+
   if (!razerPayload) {
+    console.error(`${tag} ERROR: No RazerPayloadData found for userId ${userId}`);
     throw new Error(`No Razer session found for user ${userId}. Please log in again.`);
   }
 
+  console.log(`${tag} RazerPayload loaded — razerid: ${razerPayload.xRazerRazerid}, fpid: ${razerPayload.xRazerFpid}`);
+  console.log(`${tag} accessToken (first 20): ${String(razerPayload.xRazerAccessToken).slice(0, 20)}...`);
+  console.log(`${tag} cookie (first 60): ${String(razerPayload.cookieHeader).slice(0, 60)}...`);
+
+  console.log(`${tag} otp_token (cookie, first 20): ${String(payload.otp_token).slice(0, 20)}...`);
+  console.log(`${tag} rawToken (body, 6-digit): ${payload.rawToken}`);
+
+  // Exact headers matching browser request
   const headers = {
     'accept': 'application/json, text/plain, */*',
     'accept-language': 'en-US,en;q=0.9',
@@ -85,58 +117,129 @@ async function processWithRazerMode({ userId, itemIndex, payload }) {
     'x-razer-fpid': razerPayload.xRazerFpid,
     'x-razer-language': 'en',
     'x-razer-razerid': razerPayload.xRazerRazerid,
-    'cookie': razerPayload.cookieHeader,
+    // Cookie: _rzrotptoken + _rzrotptokents + otpToken (URL encoded otp_token) — exactly as browser sends
+    'cookie': `${razerPayload.cookieHeader}; _rzrotptoken=${payload.rzrotptoken}; _rzrotptokents=${payload.rzrotptokenTs}; otpToken=${encodeURIComponent(payload.otp_token)}`,
     'Referer': `https://gold.razer.com/global/en/gold/catalog/${payload.permalink}`,
   };
 
-  // Step 1: POST checkout — stop redirect, grab location header
-  const checkoutRes = await fetch('https://gold.razer.com/api/webshop/checkout/gold', {
-    method: 'POST',
-    headers,
-    body: JSON.stringify(payload),
-    redirect: 'manual',
-  });
+  // Body otpToken = otp_token_enc (different from cookie otpToken)
+  const checkoutBody = {
+    productId: payload.productId,
+    regionId: payload.regionId,
+    paymentChannelId: payload.paymentChannelId,
+    emailIsRequired: true,
+    permalink: payload.permalink,
+    otpToken: payload.otp_token_enc,
+    savePurchaseDetails: true,
+    personalizedInfo: [],
+    ...(payload.email ? { email: payload.email } : {}),
+  };
 
-  console.log(`[item ${itemIndex}] Checkout status:`, checkoutRes.status);
+  console.log(`${tag} Step 1 — POST checkout to Razer API`);
+  console.log(`${tag} Request body:`, JSON.stringify(checkoutBody));
 
-  const location = checkoutRes.headers.get('location');
-  if (!location) {
-    throw new Error(`Checkout did not return a redirect location. Status: ${checkoutRes.status}`);
+  let checkoutRes;
+  try {
+    checkoutRes = await fetch('https://gold.razer.com/api/webshop/checkout/gold', {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(checkoutBody),
+      redirect: 'manual',
+    });
+  } catch (fetchErr) {
+    console.error(`${tag} ERROR: fetch to checkout endpoint failed (network/DNS):`, fetchErr.message);
+    throw fetchErr;
   }
 
-  console.log(`[item ${itemIndex}] Redirect location:`, location);
+  console.log(`${tag} Checkout response status:`, checkoutRes.status);
+  console.log(`${tag} Checkout response headers:`, Object.fromEntries(checkoutRes.headers.entries()));
+  console.log(`${tag} Checkout response redirected:`, checkoutRes);
+  if (!checkoutRes.ok) {
+    const bodyText = await checkoutRes.text().catch(() => '(could not read body)');
+    console.error(`${tag} ERROR: Checkout failed with status ${checkoutRes.status}. Body:`, bodyText);
+    throw new Error(`Checkout failed with status ${checkoutRes.status}. Body: ${bodyText}`);
+  }
 
-  // Extract transaction ID from the end of the location URL
-  const transactionId = location.split('/').pop();
+  // Checkout returns 200 with JSON body containing transactionNumber and paymentUrl
+  const checkoutResponse = await checkoutRes.json();
+  console.log(`${tag} Checkout response body:`, checkoutResponse);
+
+  const transactionId = checkoutResponse.transactionNumber;
+  const paymentUrl = checkoutResponse.paymentUrl;
+
   if (!transactionId) {
-    throw new Error(`Could not extract transaction ID from location: ${location}`);
+    throw new Error(`Checkout response missing transactionNumber. Body: ${JSON.stringify(checkoutResponse)}`);
   }
 
-  console.log(`[item ${itemIndex}] Transaction ID:`, transactionId);
+  console.log(`${tag} transactionNumber:`, transactionId);
+  console.log(`${tag} paymentUrl:`, paymentUrl);
 
   // Step 2: GET transaction result
-  const resultRes = await fetch(`https://gold.razer.com/api/webshopv2/${transactionId}`, {
-    method: 'GET',
-    headers: {
-      'accept': 'application/json, text/plain, */*',
-      'accept-language': 'en-US,en;q=0.9',
-      'cache-control': 'no-cache',
-      'pragma': 'no-cache',
-      'x-razer-accesstoken': razerPayload.xRazerAccessToken,
-      'x-razer-fpid': razerPayload.xRazerFpid,
-      'x-razer-language': 'en',
-      'x-razer-razerid': razerPayload.xRazerRazerid,
-      'cookie': razerPayload.cookieHeader,
-      'Referer': `https://gold.razer.com/global/en/gold/purchase/transaction/${transactionId}`,
-    },
-  });
+  console.log(`${tag} Step 2 — GET transaction result for ID: ${transactionId}`);
 
-  const resultData = await resultRes.json();
-  console.log(`[item ${itemIndex}] Transaction result:`, resultData);
+  let resultRes;
+  try {
+    resultRes = await fetch(`https://gold.razer.com/api/webshopv2/${transactionId}`, {
+      method: 'GET',
+      headers: {
+        'accept': 'application/json, text/plain, */*',
+        'accept-language': 'en-US,en;q=0.9',
+        'cache-control': 'no-cache',
+        'pragma': 'no-cache',
+        'x-razer-accesstoken': razerPayload.xRazerAccessToken,
+        'x-razer-fpid': razerPayload.xRazerFpid,
+        'x-razer-language': 'en',
+        'x-razer-razerid': razerPayload.xRazerRazerid,
+        'cookie': razerPayload.cookieHeader,
+        'Referer': `https://gold.razer.com/global/en/gold/purchase/transaction/${transactionId}`,
+      },
+    });
+  } catch (fetchErr) {
+    console.error(`${tag} ERROR: fetch to transaction result endpoint failed (network/DNS):`, fetchErr.message);
+    throw fetchErr;
+  }
+
+  console.log(`${tag} Transaction result status:`, resultRes.status);
+
+  let resultData;
+  try {
+    resultData = await resultRes.json();
+  } catch (jsonErr) {
+    const raw = await resultRes.text().catch(() => '(could not read body)');
+    console.error(`${tag} ERROR: Failed to parse transaction result as JSON. Raw body:`, raw);
+    throw new Error(`Transaction result is not valid JSON. Raw: ${raw}`);
+  }
+
+  console.log(`${tag} Transaction result data:`, JSON.stringify(resultData, null, 2));
+
+  if (!resultRes.ok) {
+    console.error(`${tag} ERROR: Transaction result returned non-2xx status ${resultRes.status}:`, resultData);
+    throw new Error(`Transaction result HTTP ${resultRes.status}: ${JSON.stringify(resultData)}`);
+  }
+
+  // Check pins to determine final status
+  const pins = resultData?.fullfillment?.pins;
+  const hasPins = Array.isArray(pins) && pins.length > 0;
+
+  if (!hasPins) {
+    console.warn(`${tag} PENDING — transaction ${transactionId} has no pins yet`);
+    return {
+      transactionId,
+      paymentUrl,
+      checkout: checkoutResponse,
+      result: resultData,
+      transactionStatus: 'pending',
+    };
+  }
+
+  console.log(`${tag} ── SUCCESS — pins received (count: ${pins.length}) ─────────────────────────────`);
 
   return {
     transactionId,
+    paymentUrl,
+    checkout: checkoutResponse,
     result: resultData,
+    transactionStatus: 'success',
   };
 }
 
@@ -152,6 +255,21 @@ async function processTransaction({ mode, jobId, userId, itemIndex, payload }) {
   return processWithFakeMode({ itemIndex, payload });
 }
 
+async function saveCompletedBatch({ jobId, userId, mode, total, counts, completedAt, transactions }) {
+  console.log(`[saveCompletedBatch] Saving completed batch — jobId: ${jobId}, userId: ${userId}, total: ${total}, counts:`, counts);
+  try {
+    await CompletedBatch.findOneAndUpdate(
+      { userId },
+      { jobId, mode, total, counts, completedAt, transactions },
+      { upsert: true, new: true }
+    );
+    console.log(`[saveCompletedBatch] Saved successfully for userId: ${userId}`);
+  } catch (err) {
+    console.error(`[saveCompletedBatch] ERROR: Failed to save completed batch for userId ${userId}:`, err.message);
+    throw err;
+  }
+}
+
 function startBatch({ userId, transactions, concurrency, mode }) {
   const selectedMode = ALLOWED_MODES.has(mode) ? mode : 'fake';
 
@@ -162,6 +280,7 @@ function startBatch({ userId, transactions, concurrency, mode }) {
     mode: selectedMode,
     processFn: ({ jobId, userId: ownerId, itemIndex, payload }) =>
       processTransaction({ mode: selectedMode, jobId, userId: ownerId, itemIndex, payload }),
+    onCompletedFn: saveCompletedBatch,
   });
 }
 

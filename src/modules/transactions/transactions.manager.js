@@ -9,7 +9,7 @@ class TransactionsManager {
     this.jobs = new Map();
   }
 
-  createJob({ userId, transactions, concurrency, mode, processFn }) {
+  createJob({ userId, transactions, concurrency, mode, processFn, onCompletedFn }) {
     const normalizedConcurrency = Math.max(1, Math.min(MAX_CONCURRENCY, Number(concurrency) || 1));
     const normalizedMode = ALLOWED_MODES.has(mode) ? mode : 'fake';
 
@@ -43,6 +43,7 @@ class TransactionsManager {
         cancelled: 0,
       },
       processFn,
+      onCompletedFn: onCompletedFn || null,
       lastResults: [],
     };
 
@@ -168,6 +169,9 @@ class TransactionsManager {
 
   async processItem(job, workItem) {
     const startTime = Date.now();
+    const tag = `[manager][job ${job.id.slice(0, 8)}][item ${workItem.index}]`;
+
+    console.log(`${tag} Processing started — mode: ${job.mode}, activeCount: ${job.activeCount}, queueLeft: ${job.queue.length}`);
 
     try {
       const output = await job.processFn({
@@ -185,6 +189,7 @@ class TransactionsManager {
         output,
       };
 
+      console.log(`${tag} SUCCESS — ${result.processingMs}ms`);
       this.pushResult(job, result);
       job.counts.completed += 1;
     } catch (err) {
@@ -196,12 +201,15 @@ class TransactionsManager {
         error: err && err.message ? err.message : 'Unknown processing error',
       };
 
+      console.error(`${tag} FAILED — ${result.processingMs}ms — error: ${result.error}`);
       this.pushResult(job, result);
       job.counts.failed += 1;
     } finally {
       job.activeCount -= 1;
       job.counts.running -= 1;
       job.updatedAt = new Date();
+
+      console.log(`${tag} counts after:`, { ...job.counts });
 
       this.emit(job, 'transactions:progress', {
         message: 'Batch progress update',
@@ -229,6 +237,20 @@ class TransactionsManager {
     this.emit(job, 'transactions:completed', {
       message: 'Batch job completed',
     });
+
+    if (typeof job.onCompletedFn === 'function') {
+      job.onCompletedFn({
+        jobId: job.id,
+        userId: job.userId,
+        mode: job.mode,
+        total: job.total,
+        counts: { ...job.counts },
+        completedAt: job.endedAt,
+        transactions: [...job.lastResults],
+      }).catch((err) => {
+        console.error('[TransactionsManager] Failed to save completed batch:', err.message);
+      });
+    }
   }
 
   finalizeStopped(job) {
@@ -245,6 +267,20 @@ class TransactionsManager {
     this.emit(job, 'transactions:stopped', {
       message: 'Batch job stopped',
     });
+
+    if (typeof job.onCompletedFn === 'function') {
+      job.onCompletedFn({
+        jobId: job.id,
+        userId: job.userId,
+        mode: job.mode,
+        total: job.total,
+        counts: { ...job.counts },
+        completedAt: job.endedAt,
+        transactions: [...job.lastResults],
+      }).catch((err) => {
+        console.error('[TransactionsManager] Failed to save stopped batch:', err.message);
+      });
+    }
   }
 
   emit(job, eventName, extra = {}) {

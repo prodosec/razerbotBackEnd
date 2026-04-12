@@ -1,6 +1,7 @@
 const transactionsService = require('./transactions.service');
 const speakeasy = require('speakeasy');
 const RazerPayloadData = require('../auth/razerPayloadData.model');
+const CompletedBatch = require('./completedBatch.model');
 
 function normalizeMode(mode) {
   if (typeof mode !== 'string') {
@@ -43,39 +44,82 @@ async function generateOTP(req, res, next) {
       secret: secret,
       encoding: 'base32',
     });
-    console.log('Generated OTP token:', token);
+
+    const clientId = process.env.LAST_CLIENT_ID_PASSED || '63c74d17e027dc11f642146bfeeaee09c3ce23d8';
 
     // Send to Razer API with exact headers from browser
-    const response = await fetch('https://razer-otptoken-service.razer.com/totp/post', {
-      method: 'POST',
-      headers: {
-        'accept': 'application/json, text/plain, */*',
-        'accept-language': 'en-US,en;q=0.9',
-        'access-control-allow-origin': '*',
-        'authorization': `Bearer ${razerPayload.xRazerAccessToken}`,
-        'cache-control': 'no-cache',
-        'content-type': 'application/json',
-        'pragma': 'no-cache',
-        'cookie': razerPayload.cookieHeader,
-        'Referer': 'https://razerid.razer.com/',
-      },
-      body: JSON.stringify({
-        client_id: process.env.LAST_CLIENT_ID_PASSED || '63c74d17e027dc11f642146bfeeaee09c3ce23d8',
-        token: token,
-      }),
-    });
+    let response;
+    try {
+      response = await fetch('https://razer-otptoken-service.razer.com/totp/post', {
+        method: 'POST',
+        headers: {
+          'accept': 'application/json, text/plain, */*',
+          'accept-language': 'en-US,en;q=0.9',
+          'access-control-allow-origin': '*',
+          'authorization': `Bearer ${razerPayload.xRazerAccessToken}`,
+          'cache-control': 'no-cache',
+          'content-type': 'application/json',
+          'pragma': 'no-cache',
+          'cookie': razerPayload.cookieHeader,
+          'Referer': 'https://razerid.razer.com/',
+        },
+        body: JSON.stringify({ client_id: clientId,  token }),
+      });
+    } catch (fetchErr) {
+      console.error('[generateOTP] ERROR: fetch to OTP endpoint failed (network/DNS):', fetchErr.message);
+      throw fetchErr;
+    }
 
 
-    // Extract _rzrotptoken from set-cookie header
+    // Read body for both debugging and extracting body otpToken
+    const responseBodyText = await response.text().catch(() => '(could not read body)');
+
+    if (!response.ok) {
+      console.error(`[generateOTP] ERROR: OTP endpoint returned ${response.status}:`, responseBodyText);
+      return res.status(400).json({
+        success: false,
+        message: `Razer OTP service rejected the token (status ${response.status}): ${responseBodyText}`,
+      });
+    }
+
+    // Extract _rzrotptoken and _rzrotptokents from set-cookie
     const setCookieHeader = response.headers.get('set-cookie') || '';
-    const otpTokenMatch = setCookieHeader.match(/_rzrotptoken=([^;]+)/);
-    const otpToken = otpTokenMatch ? otpTokenMatch[1] : null;
 
+    const rzrotptokenMatch = setCookieHeader.match(/_rzrotptoken=([^;]+)/);
+    const rzrotptoken = rzrotptokenMatch ? rzrotptokenMatch[1] : null;
 
+    const rzrotptokenTsMatch = setCookieHeader.match(/_rzrotptokents=([^;]+)/);
+    const rzrotptokenTs = rzrotptokenTsMatch ? rzrotptokenTsMatch[1] : null;
+
+    if (!rzrotptoken) {
+      console.error('[generateOTP] ERROR: _rzrotptoken not found in set-cookie. Full set-cookie:', setCookieHeader);
+      return res.status(400).json({
+        success: false,
+        message: 'Razer OTP service did not return _rzrotptoken cookie.',
+      });
+    }
+
+    // Parse response body
+    let otp_token_enc = null;
+    let otp_token = null;
+    let create_ts = null;
+    try {
+      const body = JSON.parse(responseBodyText);
+      otp_token_enc = body.otp_token_enc || null;
+      otp_token = body.otp_token || null;
+      create_ts = body.create_ts || null;
+    } catch {
+      console.warn('[generateOTP] Could not parse response body as JSON');
+    }
+
+    console.log('[generateOTP] rzrotptoken (first 20):', rzrotptoken.slice(0, 20) + '...');
+    console.log('[generateOTP] rzrotptokenTs:', rzrotptokenTs);
+    console.log('[generateOTP] otp_token_enc (first 20):', otp_token_enc ? otp_token_enc.slice(0, 20) + '...' : 'NOT FOUND');
+    console.log('[generateOTP] otp_token (first 20):', otp_token ? otp_token.slice(0, 20) + '...' : 'NOT FOUND');
     return res.json({
       success: true,
       message: 'OTP generated successfully',
-      data: { otpToken },
+      data: { rzrotptoken, rzrotptokenTs, otp_token_enc, otp_token, create_ts },
     });
   } catch (err) {
     next(err);
@@ -94,7 +138,7 @@ async function startBatch(req, res, next) {
       });
     }
 
-    const requiredFields = ['productId', 'regionId', 'paymentChannelId', 'permalink', 'otpToken'];
+    const requiredFields = ['productId', 'regionId', 'paymentChannelId', 'permalink', 'rzrotptoken', 'rzrotptokenTs', 'otp_token_enc', 'otp_token'];
     const missingFields = requiredFields.filter((f) => transaction[f] === undefined || transaction[f] === null || transaction[f] === '');
     if (missingFields.length > 0) {
       return res.status(400).json({
@@ -257,7 +301,6 @@ async function getTransactionHistory(req, res, next) {
     });
 
     const data = await response.json();
-    console.log('Transaction history response:', data);
 
     return res.json({
       success: true,
@@ -269,9 +312,31 @@ async function getTransactionHistory(req, res, next) {
   }
 }
 
+async function getProgress(req, res, next) {
+  try {
+    const data = await CompletedBatch.findOne({ userId: req.userId });
+
+    if (!data) {
+      return res.status(404).json({
+        success: false,
+        message: 'No progress found. Start a batch first.',
+      });
+    }
+
+    return res.json({
+      success: true,
+      message: 'Progress fetched successfully',
+      data,
+    });
+  } catch (err) {
+    next(err);
+  }
+}
+
 module.exports = {
   generateOTP,
   getTransactionHistory,
+  getProgress,
   startBatch,
   getBatchStatus,
   pauseBatch,

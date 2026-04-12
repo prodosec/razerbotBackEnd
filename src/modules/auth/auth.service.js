@@ -337,4 +337,24 @@ async function revoke(userId) {
   await user.save();
 }
 
-module.exports = { register, login, registerRazerBrowserLogin, saveRazerPayloadData, razerLoginService, refresh, revoke };
+/**
+ * Clear all stored Razer cookies and tokens for a user
+ */
+async function clearRazerPayload(userId) {
+  await RazerPayloadData.findOneAndUpdate(
+    { userId },
+    {
+      $set: {
+        cookieHeader: '',
+        cookies: [],
+        xRazerAccessToken: '',
+        xRazerFpid: '',
+        xRazerRazerid: '',
+        razerIdAuthToken: '',
+        rawHeaders: {},
+      },
+    }
+  );
+}
+
+module.exports = { register, login, registerRazerBrowserLogin, saveRazerPayloadData, razerLoginService, refresh, revoke, clearRazerPayload };
