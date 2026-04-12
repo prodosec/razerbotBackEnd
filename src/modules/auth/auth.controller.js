@@ -505,8 +505,8 @@ async function razerCallback(req, res) {
     console.log('Razer login successful, user:', result.user);
     res.cookie("auth-token", result.accessToken, {
       httpOnly: true,
-      secure: false,
-      sameSite: "lax"
+      secure: true,
+      sameSite: "none"
     });
     return res.redirect(
       `${process.env.FRONT_END_URL}/dashboard`
