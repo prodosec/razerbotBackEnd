@@ -222,13 +222,13 @@ async function processWithRazerMode({ userId, itemIndex, payload }) {
   const hasPins = Array.isArray(pins) && pins.length > 0;
 
   if (!hasPins) {
-    console.warn(`${tag} PENDING — transaction ${transactionId} has no pins yet`);
+    console.warn(`${tag} REVIEWING — transaction ${transactionId} has no pins yet`);
     return {
       transactionId,
       paymentUrl,
       checkout: checkoutResponse,
       result: resultData,
-      transactionStatus: 'pending',
+      transactionStatus: 'reviewing',
     };
   }
 

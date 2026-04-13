@@ -333,10 +333,31 @@ async function getProgress(req, res, next) {
   }
 }
 
+async function deleteProgress(req, res, next) {
+  try {
+    const deleted = await CompletedBatch.findOneAndDelete({ userId: req.userId });
+
+    if (!deleted) {
+      return res.status(404).json({
+        success: false,
+        message: 'No completed batch found to delete.',
+      });
+    }
+
+    return res.json({
+      success: true,
+      message: 'Completed batch deleted successfully.',
+    });
+  } catch (err) {
+    next(err);
+  }
+}
+
 module.exports = {
   generateOTP,
   getTransactionHistory,
   getProgress,
+  deleteProgress,
   startBatch,
   getBatchStatus,
   pauseBatch,

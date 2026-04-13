@@ -36,11 +36,11 @@ class TransactionsManager {
       endedAt: null,
       total: queue.length,
       counts: {
-        pending: queue.length,
+        unprocessed: queue.length,
         running: 0,
-        completed: 0,
+        success: 0,
+        reviewing: 0,
         failed: 0,
-        cancelled: 0,
       },
       processFn,
       onCompletedFn: onCompletedFn || null,
@@ -155,7 +155,7 @@ class TransactionsManager {
     while (job.activeCount < job.concurrency && job.queue.length > 0 && !job.paused && !job.stopRequested) {
       const workItem = job.queue.shift();
       job.activeCount += 1;
-      job.counts.pending -= 1;
+      job.counts.unprocessed -= 1;
       job.counts.running += 1;
       job.updatedAt = new Date();
 
@@ -181,17 +181,24 @@ class TransactionsManager {
         payload: workItem.payload,
       });
 
+      const itemStatus = output?.transactionStatus === 'reviewing' ? 'reviewing' : 'success';
+
       const result = {
         itemId: workItem.itemId,
         itemIndex: workItem.index,
-        status: 'success',
+        status: itemStatus,
         processingMs: Date.now() - startTime,
         output,
       };
 
-      console.log(`${tag} SUCCESS — ${result.processingMs}ms`);
+      if (itemStatus === 'reviewing') {
+        console.log(`${tag} REVIEWING (no pins yet) — ${result.processingMs}ms`);
+        job.counts.reviewing += 1;
+      } else {
+        console.log(`${tag} SUCCESS — ${result.processingMs}ms`);
+        job.counts.success += 1;
+      }
       this.pushResult(job, result);
-      job.counts.completed += 1;
     } catch (err) {
       const result = {
         itemId: workItem.itemId,
@@ -254,9 +261,7 @@ class TransactionsManager {
   }
 
   finalizeStopped(job) {
-    const cancelled = job.queue.length;
-    if (cancelled > 0) {
-      job.counts.cancelled += cancelled;
+    if (job.queue.length > 0) {
       job.queue.length = 0;
     }
 
