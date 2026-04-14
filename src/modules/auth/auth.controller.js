@@ -416,7 +416,7 @@ async function homepage(req, res, next) {
     //     timeout: 60000,
     //   });
     // } else {
-      homepageBrowser = await chromium.launch({ headless: false });
+      homepageBrowser = await chromium.launch({ headless: true });
       homepagePage = await homepageBrowser.newPage();
       await homepagePage.goto('https://razerid.razer.com/', {
         waitUntil: 'domcontentloaded',
