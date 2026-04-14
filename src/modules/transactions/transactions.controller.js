@@ -312,6 +312,79 @@ async function getTransactionHistory(req, res, next) {
   }
 }
 
+async function getPinHistory(req, res, next) {
+  try {
+    const { transactionNumbers } = req.body || {};
+
+    if (!Array.isArray(transactionNumbers) || transactionNumbers.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'transactionNumbers must be a non-empty array',
+      });
+    }
+
+    const razerPayload = await RazerPayloadData.findOne({ userId: req.userId });
+    if (!razerPayload || !razerPayload.xRazerAccessToken) {
+      return res.status(400).json({
+        success: false,
+        message: 'Razer session not found. Please log in with Razer first.',
+      });
+    }
+
+    const limit = 5;
+
+    const results = [];
+
+    for (let i = 0; i < transactionNumbers.length; i += limit) {
+      const batch = transactionNumbers.slice(i, i + limit);
+
+      const batchResults = await Promise.all(
+        batch.map(async (txNumber) => {
+          try {
+            const response = await fetch(`https://gold.razer.com/api/webshopv2/${txNumber}`, {
+              method: 'GET',
+              headers: {
+                'accept': 'application/json, text/plain, */*',
+                'accept-language': 'en-US,en;q=0.9',
+                'cache-control': 'no-cache',
+                'pragma': 'no-cache',
+                'x-razer-accesstoken': razerPayload.xRazerAccessToken,
+                'x-razer-fpid': razerPayload.xRazerFpid,
+                'x-razer-razerid': razerPayload.xRazerRazerid,
+                'cookie': razerPayload.cookieHeader,
+                'Referer': `https://gold.razer.com/globalzh/en/transaction/purchase/${txNumber}`,
+              },
+            });
+
+            const data = await response.json();
+            const pins = data.fullfillment?.pins ?? [];
+            if (pins.length === 0) {
+              return [{ productId: data.productId ?? null, productName: data.productName ?? null, pin: null }];
+            }
+            return pins.map((p) => ({
+              productId: data.productId ?? null,
+              productName: data.productName ?? null,
+              pin: p.pinCode1 ?? null,
+            }));
+          } catch (err) {
+            return { transactionNumber: txNumber, success: false, error: err.message };
+          }
+        })
+      );
+
+      results.push(...batchResults.flat());
+    }
+
+    return res.json({
+      success: true,
+      message: 'Pin history fetched successfully',
+      data: results,
+    });
+  } catch (err) {
+    next(err);
+  }
+}
+
 async function getProgress(req, res, next) {
   try {
     const data = await CompletedBatch.findOne({ userId: req.userId });
@@ -356,6 +429,7 @@ async function deleteProgress(req, res, next) {
 module.exports = {
   generateOTP,
   getTransactionHistory,
+  getPinHistory,
   getProgress,
   deleteProgress,
   startBatch,

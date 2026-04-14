@@ -229,11 +229,6 @@ class TransactionsManager {
 
   pushResult(job, result) {
     job.lastResults.push(result);
-
-    const MAX_BUFFERED_RESULTS = 100;
-    if (job.lastResults.length > MAX_BUFFERED_RESULTS) {
-      job.lastResults.shift();
-    }
   }
 
   finalizeCompleted(job) {

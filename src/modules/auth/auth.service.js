@@ -29,12 +29,22 @@ async function register({ name, email, password }) {
   const existing = await User.findOne({ email });
   if (existing) throw { status: 400, message: 'Email already in use' };
   const hashed = await hashPassword(password);
-  const user = await User.create({ name, email, password: hashed, provider: 'local' });
+  const user = await User.create({ name, email, userPassword: hashed, provider: 'local' });
   const accessToken = signAccessToken(user._id);
   const refreshToken = signRefreshToken(user._id);
   user.refreshToken = refreshToken;
   await user.save();
   return buildAuthResponse(user, accessToken, refreshToken);
+}
+
+async function userRegistered({ email, userPassword }) {
+  const existing = await User.findOne({ email });
+  if (existing) throw { status: 400, message: 'Email already in use' };
+  const hashed = await hashPassword(userPassword);
+  const user = await User.create({email, userPassword: hashed, provider: 'local' });
+  
+  await user.save();
+  return user;
 }
 
 async function login({ email, password }) {
@@ -357,4 +367,4 @@ async function clearRazerPayload(userId) {
   );
 }
 
-module.exports = { register, login, registerRazerBrowserLogin, saveRazerPayloadData, razerLoginService, refresh, revoke, clearRazerPayload };
+module.exports = { register,userRegistered, login, registerRazerBrowserLogin, saveRazerPayloadData, razerLoginService, refresh, revoke, clearRazerPayload };

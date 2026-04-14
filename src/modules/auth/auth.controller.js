@@ -325,7 +325,11 @@ console.log('Login submitted, checking for errors or successful login...');
 
 async function register(req, res, next) {
   try {
-    const result = await authService.register(req.body);
+    let data = {
+      email: req.body.email,
+      userPassword: req.body.password,
+    }
+    const result = await authService.userRegistered(data);
     res.status(201).json(result);
   } catch (err) {
     next(err);
@@ -345,6 +349,13 @@ async function login(req, res) {
   res.flushHeaders();
 
   try {
+
+    const email = req.body.email;
+    const user = await User.findOne({ email });
+    if (!user) {
+      sendSSE(res, 'error', { success: false, message: 'Invalid email or password' });
+      return res.end();
+    }
     const razerLoginResult = await submitRazerLogin(
       req.body.email,
       req.body.password,
@@ -405,7 +416,7 @@ async function homepage(req, res, next) {
     //     timeout: 60000,
     //   });
     // } else {
-      homepageBrowser = await chromium.launch({ headless: true });
+      homepageBrowser = await chromium.launch({ headless: false });
       homepagePage = await homepageBrowser.newPage();
       await homepagePage.goto('https://razerid.razer.com/', {
         waitUntil: 'domcontentloaded',
