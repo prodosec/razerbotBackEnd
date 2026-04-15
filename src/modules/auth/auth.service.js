@@ -1,4 +1,5 @@
 const User = require('./user.model');
+const RegisteredUser = require('./user.model');
 const RazerPayloadData = require('./razerPayloadData.model');
 
 const DEFAULT_RAZER_GOLD_URL = process.env.RAZER_GOLD_URL || 'https://gold.razer.com/pk/en';
@@ -29,7 +30,7 @@ async function register({ name, email, password }) {
   const existing = await User.findOne({ email });
   if (existing) throw { status: 400, message: 'Email already in use' };
   const hashed = await hashPassword(password);
-  const user = await User.create({ name, email, userPassword: hashed, provider: 'local' });
+  const user = await User.create({ name, email, password: hashed, provider: 'local' });
   const accessToken = signAccessToken(user._id);
   const refreshToken = signRefreshToken(user._id);
   user.refreshToken = refreshToken;
@@ -37,14 +38,14 @@ async function register({ name, email, password }) {
   return buildAuthResponse(user, accessToken, refreshToken);
 }
 
-async function userRegistered({ email, userPassword }) {
-  const existing = await User.findOne({ email });
+async function userRegistered({ email, password }) {
+  const existing = await RegisteredUser.findOne({ email });
   if (existing) throw { status: 400, message: 'Email already in use' };
-  const hashed = await hashPassword(userPassword);
-  const user = await User.create({email, userPassword: hashed, provider: 'local' });
+  const hashed = await hashPassword(password);
+  const registeredUser = await RegisteredUser.create({email, password: hashed, provider: 'local' });
   
-  await user.save();
-  return user;
+  await registeredUser.save();
+  return registeredUser;
 }
 
 async function login({ email, password }) {

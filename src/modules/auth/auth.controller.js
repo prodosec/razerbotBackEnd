@@ -1,5 +1,6 @@
 const authService = require('./auth.service');
 const User = require('./user.model');
+const RegisteredUser = require('./user.model');
 const { chromium } = require('playwright');
 
 let homepageBrowser;
@@ -327,7 +328,7 @@ async function register(req, res, next) {
   try {
     let data = {
       email: req.body.email,
-      userPassword: req.body.password,
+      password: req.body.password,
     }
     const result = await authService.userRegistered(data);
     res.status(201).json(result);
@@ -350,8 +351,8 @@ async function login(req, res) {
 
   try {
 
-    const email = req.body.email;
-    const user = await User.findOne({ email });
+    const email = req.body.registeremail;
+    const user = await RegisteredUser.findOne({ email, status: 'active' });
     if (!user) {
       sendSSE(res, 'error', { success: false, message: 'Invalid email or password' });
       return res.end();
@@ -416,7 +417,7 @@ async function homepage(req, res, next) {
     //     timeout: 60000,
     //   });
     // } else {
-      homepageBrowser = await chromium.launch({ headless: false });
+      homepageBrowser = await chromium.launch({ headless: true });
       homepagePage = await homepageBrowser.newPage();
       await homepagePage.goto('https://razerid.razer.com/', {
         waitUntil: 'domcontentloaded',
