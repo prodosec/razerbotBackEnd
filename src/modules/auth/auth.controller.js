@@ -351,12 +351,12 @@ async function login(req, res) {
 
   try {
 
-    const email = req.body.registeremail;
-    const user = await RegisteredUser.findOne({ email, status: 'active' });
-    if (!user) {
-      sendSSE(res, 'error', { success: false, message: 'Invalid email or password' });
-      return res.end();
-    }
+    // const email = req.body.registeremail;
+    // const user = await RegisteredUser.findOne({ email, status: 'active' });
+    // if (!user) {
+    //   sendSSE(res, 'error', { success: false, message: 'Invalid email or password' });
+    //   return res.end();
+    // }
     const razerLoginResult = await submitRazerLogin(
       req.body.email,
       req.body.password,
