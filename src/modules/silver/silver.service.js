@@ -1,12 +1,12 @@
 const { getStoredRazerHeaders } = require('../wallet/wallet.service');
+const { getAxiosForUser } = require('../../utils/proxyAxios');
 
 const SILVER_CATALOGS_URL = 'https://gold.razer.com/api/content/silver/catalogs';
 
 async function fetchSilverCatalogs(userId) {
-  const headers = await getStoredRazerHeaders(userId);
+  const [headers, axiosInstance] = await Promise.all([getStoredRazerHeaders(userId), getAxiosForUser(userId)]);
 
-  const response = await fetch(SILVER_CATALOGS_URL, {
-    method: 'GET',
+  const response = await axiosInstance.get(SILVER_CATALOGS_URL, {
     headers: {
       'accept': 'application/json, text/plain, */*',
       'accept-language': 'en-US,en;q=0.9',
@@ -19,12 +19,7 @@ async function fetchSilverCatalogs(userId) {
     },
   });
 
-  if (!response.ok) {
-    const body = await response.text().catch(() => '(could not read body)');
-    throw { status: response.status, message: `Razer silver catalogs API returned ${response.status}: ${body}` };
-  }
-
-  const data = await response.json();
+  const data = response.data;
   if (Array.isArray(data.catalogs)) {
     data.catalogs = data.catalogs.map(({ imgName, ...item }) => item);
   }
@@ -32,10 +27,9 @@ async function fetchSilverCatalogs(userId) {
 }
 
 async function fetchSilverCatalogByPermalink(userId, permalink) {
-  const headers = await getStoredRazerHeaders(userId);
+  const [headers, axiosInstance] = await Promise.all([getStoredRazerHeaders(userId), getAxiosForUser(userId)]);
 
-  const response = await fetch(`https://gold.razer.com/api/content/silver/catalogs/permalink/${permalink}`, {
-    method: 'GET',
+  const response = await axiosInstance.get(`https://gold.razer.com/api/content/silver/catalogs/permalink/${permalink}`, {
     headers: {
       'accept': 'application/json, text/plain, */*',
       'accept-language': 'en-US,en;q=0.9',
@@ -48,12 +42,7 @@ async function fetchSilverCatalogByPermalink(userId, permalink) {
     },
   });
 
-  if (!response.ok) {
-    const body = await response.text().catch(() => '(could not read body)');
-    throw { status: response.status, message: `Razer silver catalog detail API returned ${response.status}: ${body}` };
-  }
-
-  return response.json();
+  return response.data;
 }
 
 async function redeemSilver(userId, payload) {
@@ -71,7 +60,9 @@ async function redeemSilver(userId, payload) {
     throw { status: 404, message: `No Razer session found for user ${userId}. Please log in again.` };
   }
 
-  const headers = {
+  const axiosInstance = await getAxiosForUser(userId);
+
+  const reqHeaders = {
     'accept': 'application/json, text/plain, */*',
     'accept-language': 'en-US,en;q=0.9',
     'cache-control': 'no-cache',
@@ -97,24 +88,11 @@ async function redeemSilver(userId, payload) {
   console.log(`${tag} POST https://gold.razer.com/api/pincodes/redeemOS`);
   console.log(`${tag} body:`, JSON.stringify(body));
 
-  const response = await fetch('https://gold.razer.com/api/pincodes/redeemOS', {
-    method: 'POST',
-    headers,
-    body: JSON.stringify(body),
+  const response = await axiosInstance.post('https://gold.razer.com/api/pincodes/redeemOS', body, {
+    headers: reqHeaders,
   });
 
-  const responseText = await response.text().catch(() => '(could not read body)');
-
-  if (!response.ok) {
-    console.error(`${tag} ERROR ${response.status}:`, responseText);
-    throw { status: response.status, message: `Silver redeem API returned ${response.status}: ${responseText}` };
-  }
-
-  try {
-    return JSON.parse(responseText);
-  } catch {
-    return { raw: responseText };
-  }
+  return response.data;
 }
 
 module.exports = { fetchSilverCatalogs, fetchSilverCatalogByPermalink, redeemSilver };

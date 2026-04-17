@@ -27,21 +27,10 @@ async function fetchGameDetail(userId, regionId, permalink) {
 
 async function fetchProductPrice(userId, payload) {
   const headers = await getStoredRazerHeaders(userId);
-  const requestHeaders = {
-    ...headers,
-    'content-type': 'application/json',
-  };
-
   const response = await axios.post(GOPRECHECK_PRICE_URL, payload, {
-    headers: requestHeaders,
+    headers: { ...headers, 'content-type': 'application/json' },
   });
-
   return response.data;
 }
 
-module.exports = {
-  fetchGamesList,
-  searchGames,
-  fetchGameDetail,
-  fetchProductPrice,
-};
+module.exports = { fetchGamesList, searchGames, fetchGameDetail, fetchProductPrice };

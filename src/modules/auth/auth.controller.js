@@ -529,6 +529,26 @@ async function razerCallback(req, res) {
   }
 }
 
+function getProxies(req, res) {
+  const { PROXY_LIST, DEFAULT_PROXY_ID } = require('../../utils/proxyAxios');
+  const proxies = PROXY_LIST.filter((p) => !p.disabled).map(({ id, label, country }) => ({ id, label, country }));
+  res.json({ success: true, proxies, defaultProxyId: DEFAULT_PROXY_ID });
+}
+
+async function setProxy(req, res, next) {
+  try {
+    const { proxyId } = req.body;
+    const update = { proxyId: proxyId ?? null };
+    await RegisteredUser.findByIdAndUpdate(req.userId, update);
+    return res.json({
+      success: true,
+      message: proxyId ? `Proxy set to ID ${proxyId}` : 'Proxy disconnected, using default',
+    });
+  } catch (err) {
+    next(err);
+  }
+}
+
 module.exports = {
   register,
   login,
@@ -538,4 +558,6 @@ module.exports = {
   logout,
   redirectToRazer,
   razerCallback,
+  setProxy,
+  getProxies,
 };

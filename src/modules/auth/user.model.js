@@ -14,6 +14,7 @@ const userSchema = new mongoose.Schema(
     refreshToken: { type: String },
     open_id: { type: String },
     provider: { type: String, enum: ['local', 'razer'], default: 'local' },
+    proxyId: { type: Number, default: null },
   },
   { timestamps: true }
 );
@@ -31,6 +32,7 @@ const registeredUser = new mongoose.Schema(
     refreshToken: { type: String },
     open_id: { type: String },
     provider: { type: String, enum: ['local', 'razer'], default: 'local' },
+    proxyId: { type: Number, default: null },
   },
   { timestamps: true }
 );

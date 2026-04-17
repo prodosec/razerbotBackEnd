@@ -16,5 +16,7 @@ router.get('/razer/callback', controller.razerCallback);
 router.post('/refresh', controller.refresh);
 router.post('/logout', auth, controller.logout);
 router.get('/me', auth, controller.me);
+router.get('/proxies', controller.getProxies);
+router.patch('/proxy', auth, controller.setProxy);
 
 module.exports = router;
