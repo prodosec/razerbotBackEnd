@@ -44,4 +44,4 @@ async function getAxiosForUser(userId) {
   return buildAxiosWithProxy(user?.proxyId ?? DEFAULT_PROXY_ID);
 }
 
-module.exports = { getAxiosForUser, PROXY_LIST, DEFAULT_PROXY_ID };
+module.exports = { getAxiosForUser, buildAxiosWithProxy, PROXY_LIST, DEFAULT_PROXY_ID };

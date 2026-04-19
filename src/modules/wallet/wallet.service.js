@@ -10,7 +10,7 @@ async function getStoredRazerHeaders(userId) {
     throw { status: 404, message: 'Razer payload data not found. Please log in with Razer first.' };
   }
 
-  if (!payload.xRazerAccessToken || !payload.xRazerFpid || !payload.xRazerRazerid) {
+  if (!payload.xRazerAccessToken) {
     throw { status: 400, message: 'Stored Razer headers are incomplete. Please log in with Razer again.' };
   }
 

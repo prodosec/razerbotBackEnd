@@ -1,5 +1,6 @@
 const silverService = require('./silver.service');
 
+
 async function getSilverCatalogs(req, res, next) {
   try {
     const data = await silverService.fetchSilverCatalogs(req.userId);
@@ -61,4 +62,17 @@ async function redeemSilver(req, res, next) {
   }
 }
 
-module.exports = { getSilverCatalogs, getSilverCatalogByPermalink, redeemSilver };
+async function getSilverReceipt(req, res, next) {
+  try {
+    const { transactionId } = req.params;
+    if (!transactionId)
+      return res.status(400).json({ success: false, message: 'transactionId is required' });
+
+    const data = await silverService.fetchSilverReceipt(req.userId, transactionId);
+    return res.json({ success: true, data });
+  } catch (err) {
+    next(err);
+  }
+}
+
+module.exports = { getSilverCatalogs, getSilverCatalogByPermalink, redeemSilver, getSilverReceipt };
