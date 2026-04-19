@@ -5,7 +5,7 @@ const RazerPayloadData = require('../auth/razerPayloadData.model');
 const { getAxiosForUser, PROXY_LIST } = require('../../utils/proxyAxios');
 
 function getRotatingProxies(count = 3) {
-  const active = PROXY_LIST.filter(p => !p.disabled && !p.dedicated);
+  const active = PROXY_LIST.filter(p => !p.disabled);
   return active.slice(0, Math.min(count, active.length));
 }
 

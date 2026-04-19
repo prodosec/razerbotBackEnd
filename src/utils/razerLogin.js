@@ -73,15 +73,11 @@ function buildClient(proxy = null) {
   const ua = USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)];
   const config = { jar, withCredentials: true, timeout: 10000, headers: { 'user-agent': ua } };
 
-  if (proxy) {
+  if (proxy && proxy.username && proxy.password) {
     const { HttpsProxyAgent } = require('https-proxy-agent');
-    const WEBSHARE_USER = process.env.WEBSHARE_USER || '';
-    const WEBSHARE_PASS = process.env.WEBSHARE_PASS || '';
-    if (WEBSHARE_USER && WEBSHARE_PASS) {
-      const agent = new HttpsProxyAgent(`http://${WEBSHARE_USER}:${WEBSHARE_PASS}@${proxy.ip}:${proxy.port}`);
-      config.httpAgent = agent;
-      config.httpsAgent = agent;
-    }
+    const agent = new HttpsProxyAgent(`http://${proxy.username}:${proxy.password}@${proxy.ip}:${proxy.port}`);
+    config.httpAgent = agent;
+    config.httpsAgent = agent;
   }
 
   return wrapper(axios.create(config));
