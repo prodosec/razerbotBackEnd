@@ -719,40 +719,13 @@ async function bulkRedeemSilver(accounts, product, { batchSize = 50, country = '
     return chunkResults;
   }
 
-  // Phase 1 — dedicated proxies get exactly 40 accounts each, remainder splits across shared proxies
-  // All chunks run in parallel
-  const DEDICATED_CAP = 40;
   let phase1 = [];
 
-  const chunks = [];
-
-  // Assign up to DEDICATED_CAP accounts to each dedicated proxy
-  let cursor = 0;
-  for (const proxy of dedicatedProxies) {
-    if (cursor >= accounts.length) break;
-    const slice = accounts.slice(cursor, cursor + DEDICATED_CAP);
-    chunks.push({ proxy: [proxy], accounts: slice, label: proxy.label });
-    cursor += slice.length;
-  }
-
-  // Remaining accounts split evenly across shared proxies
-  const remaining = accounts.slice(cursor);
-  if (remaining.length > 0) {
-    const pool = sharedProxies.length ? sharedProxies : PROXY_LIST.filter(p => !p.disabled);
-    if (pool.length > 0) {
-      const perProxy = Math.ceil(remaining.length / pool.length);
-      let rCursor = 0;
-      for (const proxy of pool) {
-        if (rCursor >= remaining.length) break;
-        const slice = remaining.slice(rCursor, rCursor + perProxy);
-        chunks.push({ proxy: [proxy], accounts: slice, label: proxy.label });
-        rCursor += slice.length;
-      }
-    } else {
-      // No proxies at all — run remaining without proxy
-      chunks.push({ proxy: [], accounts: remaining, label: 'no-proxy' });
-    }
-  }
+  const proxies = dedicatedProxies.length ? dedicatedProxies : PROXY_LIST.filter(p => !p.disabled);
+  const perProxy = Math.ceil(accounts.length / proxies.length);
+  const chunks = proxies
+    .map((proxy, p) => ({ proxy: [proxy], accounts: accounts.slice(p * perProxy, (p + 1) * perProxy), label: proxy.label }))
+    .filter(c => c.accounts.length > 0);
 
   console.log(`[bulkRedeem] Sequential chunks: ${chunks.map(c => `${c.label}×${c.accounts.length}`).join(' | ')}`);
 
