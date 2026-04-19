@@ -1,5 +1,6 @@
-const { loadAccounts, authenticateAccounts, transactAccounts, getProductBalance, getSilverBalances } = require('./multipleSilverLogin.service');
+const { loadAccounts, authenticateAccounts, transactAccounts, getProductBalance, getSilverBalances, bulkRedeemSilver, checkProxyHealth } = require('./multipleSilverLogin.service');
 const RazerPayloadData = require('../auth/razerPayloadData.model');
+const SilverMultipleTransaction = require('./silverMultipleTransaction.model');
 const logStore = require('../../utils/logStore');
 
 async function debugPayload(req, res) {
@@ -185,6 +186,53 @@ async function bulkSilverBalance(req, res, next) {
   }
 }
 
+async function bulkSilverRedeem(req, res, next) {
+  try {
+    const { accounts, product, country, batchSize } = req.body;
+
+    if (!Array.isArray(accounts) || accounts.length === 0)
+      return res.status(400).json({ success: false, message: 'accounts array is required' });
+
+    const missingOtp = accounts.filter(a => !a.email || !a.rzrotptoken || !a.otp_token_enc || !a.otp_token);
+    if (missingOtp.length > 0)
+      return res.status(400).json({ success: false, message: `${missingOtp.length} accounts missing OTP tokens — run 2FA step first` });
+
+    const requiredProduct = ['zSilver_id', 'region_id', 'silver_reward_id', 'amount'];
+    const missingProduct = requiredProduct.filter(f => !product?.[f]);
+    if (missingProduct.length > 0)
+      return res.status(400).json({ success: false, message: `product missing: ${missingProduct.join(', ')}` });
+
+    const result = await bulkRedeemSilver(accounts, product, { batchSize: batchSize || 20, country });
+
+    const saved = await SilverMultipleTransaction.create({
+      userId: req.userId,
+      country: country || 'United States',
+      product,
+      total: result.total,
+      redeemed: result.redeemed,
+      receiptsOk: result.receiptsOk,
+      failed: result.failed,
+      elapsed: result.elapsed,
+      phase1Elapsed: result.phase1Elapsed,
+      proxiesUsed: result.proxiesUsed,
+      results: result.results,
+    });
+
+    res.json({ success: true, _id: saved._id, ...result });
+  } catch (err) {
+    next(err);
+  }
+}
+
+async function proxyHealth(req, res, next) {
+  try {
+    const results = await checkProxyHealth();
+    res.json({ success: true, results });
+  } catch (err) {
+    next(err);
+  }
+}
+
 async function getLogs(req, res) {
   const limit = parseInt(req.query.limit) || 100;
   res.json({ logs: logStore.getLogs(limit) });
@@ -195,4 +243,4 @@ async function clearLogs(req, res) {
   res.json({ success: true, message: 'Logs cleared' });
 }
 
-module.exports = { bulkLoad, bulkLoadStream, bulkAuthenticate, debugPayload, bulkTransact, productBalance, bulkSilverBalance, getLogs, clearLogs };
+module.exports = { bulkLoad, bulkLoadStream, bulkAuthenticate, debugPayload, bulkTransact, productBalance, bulkSilverBalance, bulkSilverRedeem, getLogs, clearLogs, proxyHealth };

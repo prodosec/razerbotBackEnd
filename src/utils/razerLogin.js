@@ -69,7 +69,7 @@ function buildClient(proxy = null) {
   // Set JS-only cookies that Razer's browser JS would normally inject
   jar.setCookieSync(`lastClientIdPassed=${CLIENT_ID}; Domain=razerid.razer.com; Path=/`, 'https://razerid.razer.com');
   jar.setCookieSync('RazerIDLanguage=en; Domain=razerid.razer.com; Path=/', 'https://razerid.razer.com');
-  jar.setCookieSync('RazerClientSignature=cb6d61dba17d1ee488a11e9b179f867dd41adb4e7bec5ebeae78f281d5f37a5197febf6d16f184319d7b73ce0fbd1f53e6ec8fc9440aa862058047817bcd1e386c9bdfeebcd1003640799427ea0c475e28ce6226947051b2b834970c75b3916a536f0e8a072d22849371f76534b046b5cbeb2c4333c897b7ddf1f0307766e1aff2fba035edc3e0c2e1ff7256581e4054f54da26d7e75d443; Domain=razerid.razer.com; Path=/', 'https://razerid.razer.com');
+  jar.setCookieSync('RazerClientSignature=7da230a53cadbf0097bb8c950944e4406ab7c298e889fbbcc540cde40d8b1287f2a3671c1eca9d79b911c11d0d07406d89e8e7a503e9ec53394c1f1623213b056f9634e1fd310a81c020af5ecfd76a0a999e0daff4c6f907c777264b049647bf33b7a6408864615217ac214d0a2ba7c097bdd20089f11f6f5aa5c2e6c901a8d2146f834a14758bee76a98ec9dd806479144d9f8d2b969799; Domain=razerid.razer.com; Path=/', 'https://razerid.razer.com');
   const ua = USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)];
   const config = { jar, withCredentials: true, timeout: 10000, headers: { 'user-agent': ua } };
 
@@ -88,10 +88,24 @@ function buildClient(proxy = null) {
 }
 
 async function loginOneAccount({ email, password, serviceCode = '0060', proxy = null }) {
-  let client = buildClient(proxy);
+  let client = buildClient(proxy); // let so we can swap to fresh session after TOS acceptance
   const referer = `https://razerid.razer.com/?client_id=${SSO_CLIENT_ID}&redirect=${encodeURIComponent(GOLD_URL)}`;
 
-  // Step 1 — Init session
+  // Step 1 — Load main page to establish a browser-like session (sets forterToken etc.)
+  try {
+    await client.get(`https://razerid.razer.com/?client_id=${CLIENT_ID}&redirect=${encodeURIComponent(GOLD_URL)}`, {
+      headers: {
+        ...BASE_HEADERS,
+        'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'sec-fetch-dest': 'document',
+        'sec-fetch-mode': 'navigate',
+        'sec-fetch-site': 'none',
+      },
+      validateStatus: () => true,
+    });
+  } catch {}
+
+  // Step 1b — Ping
   try {
     await client.get(`https://razerid.razer.com/api/?ping=${Date.now()}`, {
       headers: { ...BASE_HEADERS, Referer: referer },
@@ -131,21 +145,44 @@ async function loginOneAccount({ email, password, serviceCode = '0060', proxy = 
 
     let consentRaw = '';
     if (errorCode === '4598' && scope) {
-      // Try POST endpoints first, then GET acceptconsent
-      // Step A — GET TOS content (browser uses GET, not POST)
+      // Step A — Ping before TOS (browser always pings before loading TOS page)
       try {
-        await client.get(
+        await client.get(`https://razerid.razer.com/api/?ping=${Date.now()}`, {
+          headers: { ...BASE_HEADERS, Referer: referer },
+          validateStatus: () => true,
+        });
+      } catch {}
+
+      // Step B — GET TOS content to get read_token and consent_token
+      let readToken = null;
+      let consentToken = null;
+      const uniqueToken = require('crypto').randomBytes(16).toString('hex');
+      try {
+        const tosGetRes = await client.get(
           `https://razerid.razer.com/api/tos/tos?minimal=1&links=0&lang=en`,
           { headers: { ...BASE_HEADERS, Referer: referer }, validateStatus: () => true }
         );
+        const tosData = tosGetRes.data;
+        readToken = tosData?.sections?.[0]?.read_token || null;
+        consentToken = tosData?.consent_token || null;
+        log.info('razerLogin', 'tos-get', { email, status: tosGetRes.status, hasReadToken: !!readToken, hasConsentToken: !!consentToken });
       } catch {}
 
-      // Step B — POST TOS acceptance (same session, scope in body)
-      const uniqueToken = require('crypto').randomBytes(16).toString('hex');
+      // Step B — POST TOS acceptance with read_token and consent_token
       try {
+        const tosBody = {
+          data: {
+            scope,
+            service_code: '0770',
+            unique_token: uniqueToken,
+            tos_content_type: 'text/html',
+            ...(readToken && { read_token: readToken }),
+            ...(consentToken && { consent_token: consentToken }),
+          }
+        };
         const tosAcceptRes = await client.post(
           'https://razerid.razer.com/api/tos/tos',
-          { data: { scope, service_code: '0770', unique_token: uniqueToken, tos_content_type: 'text/html' } },
+          tosBody,
           { headers: { ...BASE_HEADERS, 'content-type': 'application/json', Referer: referer }, validateStatus: () => true }
         );
         const resStr = typeof tosAcceptRes.data === 'string' ? tosAcceptRes.data : JSON.stringify(tosAcceptRes.data || '');
@@ -155,14 +192,26 @@ async function loginOneAccount({ email, password, serviceCode = '0060', proxy = 
         consentRaw = `[POST tos] ${ce.message}`;
       }
 
-      // Step C — Ping (browser does this after TOS acceptance, before retry)
+      // Step C — ping after TOS acceptance (browser does this)
       try {
         await client.get(`https://razerid.razer.com/api/?ping=${Date.now()}`, {
           headers: { ...BASE_HEADERS, Referer: referer },
+          validateStatus: () => true,
         });
       } catch {}
 
-      // Retry login with same session (consent recorded in same session cookies)
+      await new Promise(r => setTimeout(r, 1000));
+
+      // Step D — Fresh session: new client, new ping, then login
+      // (consent is recorded server-side for the account, fresh session picks it up)
+      client = buildClient(proxy);
+      try {
+        await client.get(`https://razerid.razer.com/api/?ping=${Date.now()}`, {
+          headers: { ...BASE_HEADERS, Referer: referer },
+          validateStatus: () => true,
+        });
+      } catch {}
+
       try {
         const retryPw = encryptPassword(password, email, serviceCode);
         const retryXml = `<COP><User><email>${email}</email><password>${retryPw}</password></User><ServiceCode>${serviceCode}</ServiceCode></COP>`;

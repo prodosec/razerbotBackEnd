@@ -5,7 +5,7 @@ const RazerPayloadData = require('../auth/razerPayloadData.model');
 const { getAxiosForUser, PROXY_LIST } = require('../../utils/proxyAxios');
 
 function getRotatingProxies(count = 3) {
-  const active = PROXY_LIST.filter(p => !p.disabled);
+  const active = PROXY_LIST.filter(p => !p.disabled && !p.dedicated);
   return active.slice(0, Math.min(count, active.length));
 }
 
@@ -498,11 +498,17 @@ async function getProductBalance({ permalink, razerPayload }) {
   return { product, regionId, balance: balanceRes.data };
 }
 
-async function getSilverBalanceOne(email) {
+async function getSilverBalanceOne(email, proxy = null) {
   const razerPayload = await RazerPayloadData.findOne({ email }).sort({ capturedAt: -1 });
   if (!razerPayload) return { email, success: false, error: 'Account not loaded' };
 
-  const axiosInstance = await getAxiosForUser(razerPayload.userId);
+  let axiosInstance;
+  if (proxy) {
+    const { buildAxiosWithProxy } = require('../../utils/proxyAxios');
+    axiosInstance = buildAxiosWithProxy(proxy.id);
+  } else {
+    axiosInstance = await getAxiosForUser(razerPayload.userId);
+  }
 
   const doFetch = () => axiosInstance.get('https://gold.razer.com/api/silver/wallet', {
     headers: {
@@ -533,19 +539,316 @@ async function getSilverBalanceOne(email) {
   return { email, success: true, balance: res.data };
 }
 
-async function getSilverBalances(emails) {
+async function getSilverBalances(emails, { batchSize = 50, onProgress } = {}) {
   const list = emails?.length
     ? emails
     : (await RazerPayloadData.find({}).distinct('email'));
 
   const start = Date.now();
-  const settled = await Promise.allSettled(list.map(email => getSilverBalanceOne(email)));
-  const results = settled.map((r, i) =>
-    r.status === 'fulfilled' ? r.value : { email: list[i], success: false, error: r.reason?.message }
-  );
+  const proxies = getRotatingProxies(9);
+  const results = [];
+
+  for (let i = 0; i < list.length; i += batchSize) {
+    const batch = list.slice(i, i + batchSize);
+
+    const batchResults = await Promise.allSettled(
+      batch.map((email, batchIdx) => {
+        const stagger = batchIdx * 120;
+        return new Promise(r => setTimeout(r, stagger))
+          .then(() => getSilverBalanceOne(email, assignProxy(i + batchIdx, proxies)));
+      })
+    );
+
+    batchResults.forEach((r, idx) => {
+      const result = r.status === 'fulfilled'
+        ? r.value
+        : { email: batch[idx], success: false, error: r.reason?.message || 'Unknown error' };
+      results.push(result);
+      if (onProgress) onProgress(result, results.length, list.length);
+    });
+
+    if (i + batchSize < list.length) await new Promise(r => setTimeout(r, 500));
+  }
+
   const elapsed = ((Date.now() - start) / 1000).toFixed(1);
   const successCount = results.filter(r => r.success).length;
   return { total: list.length, success: successCount, failed: list.length - successCount, elapsed: `${elapsed}s`, results };
 }
 
-module.exports = { loadAccounts, authenticateAccounts, transactAccounts, checkBalanceAccounts, getProductBalance, getSilverBalances };
+function getProxiesByCountry(country) {
+  const matched = PROXY_LIST.filter(p => !p.disabled && p.country.toLowerCase() === country.toLowerCase());
+  return matched.length ? matched : PROXY_LIST.filter(p => !p.disabled);
+}
+
+// Cache region_id per permalink to avoid fetching it for every account
+const _regionIdCache = {};
+
+async function fetchRegionId(permalink, axiosInstance, razerPayload) {
+  if (_regionIdCache[permalink]) return _regionIdCache[permalink];
+  try {
+    const res = await axiosInstance.get(`https://gold.razer.com/api/content/silver/catalogs/permalink/${permalink}`, {
+      headers: {
+        'accept': 'application/json, text/plain, */*',
+        'x-razer-language': 'en',
+        'cookie': razerPayload.cookieHeader || '',
+        'Referer': `https://gold.razer.com/global/en/silver/redeem/summary/${permalink}`,
+      },
+      validateStatus: () => true,
+    });
+    const regionId = res.data?.regions?.[0]?.id || null;
+    if (regionId) _regionIdCache[permalink] = regionId;
+    return regionId;
+  } catch {
+    return null;
+  }
+}
+
+async function redeemSilverOne({ email, rzrotptoken, rzrotptokenTs, otp_token_enc, otp_token }, product, proxy = null) {
+  const razerPayload = await RazerPayloadData.findOne({ email }).sort({ capturedAt: -1 });
+  if (!razerPayload) return { email, success: false, error: 'Account not loaded' };
+
+  let axiosInstance;
+  if (proxy) {
+    const { buildAxiosWithProxy } = require('../../utils/proxyAxios');
+    axiosInstance = buildAxiosWithProxy(proxy.id);
+  } else {
+    axiosInstance = await getAxiosForUser(razerPayload.userId);
+  }
+
+  // Auto-fetch region_id if not provided (catalog list items don't include regions)
+  let region_id = product.region_id;
+  if (!region_id && product.permalink) {
+    region_id = await fetchRegionId(product.permalink, axiosInstance, razerPayload);
+  }
+
+  const body = {
+    zSilver_id: product.zSilver_id,
+    region_id,
+    silver_reward_id: product.silver_reward_id || product.zSilver_id,
+    amount: product.amount,
+    language: 'en',
+    otpToken: otp_token_enc,
+    pinSupplier: 'molap',
+  };
+
+  let redeemRes;
+  try {
+    redeemRes = await axiosInstance.post('https://gold.razer.com/api/pincodes/redeemOS', body, {
+      headers: {
+        'accept': 'application/json, text/plain, */*',
+        'accept-language': 'en-US,en;q=0.9',
+        'cache-control': 'no-cache',
+        'content-type': 'application/json',
+        'pragma': 'no-cache',
+        'x-razer-accesstoken': razerPayload.xRazerAccessToken,
+        'x-razer-fpid': razerPayload.xRazerFpid || '',
+        'x-razer-razerid': razerPayload.xRazerRazerid || '',
+        'cookie': `${razerPayload.cookieHeader}; _rzrotptoken=${rzrotptoken}; _rzrotptokents=${rzrotptokenTs}; otpToken=${encodeURIComponent(otp_token)}`,
+        'Referer': `https://gold.razer.com/globalzh/en/silver/redeem/summary/${product.permalink || ''}`,
+      },
+      validateStatus: () => true,
+    });
+  } catch (err) {
+    return { email, success: false, error: `Redeem request failed: ${err.message}` };
+  }
+
+  if (redeemRes.status !== 200) {
+    return { email, success: false, error: `Redeem failed (${redeemRes.status}): ${JSON.stringify(redeemRes.data)}` };
+  }
+
+  const transactionId = redeemRes.data?.transactionNumber || redeemRes.data?.transactionId || redeemRes.data?.id;
+  if (!transactionId) {
+    return { email, success: false, error: `No transactionId in response: ${JSON.stringify(redeemRes.data)}` };
+  }
+
+  return { email, success: true, transactionId, axiosInstance, razerPayload };
+}
+
+async function fetchReceiptOne({ email, transactionId, axiosInstance, razerPayload }) {
+  try {
+    const res = await axiosInstance.get(`https://gold.razer.com/api/receipts/${transactionId}/silver`, {
+      headers: {
+        'accept': 'application/json, text/plain, */*',
+        'accept-language': 'en-US,en;q=0.9',
+        'cache-control': 'no-cache',
+        'pragma': 'no-cache',
+        'x-razer-accesstoken': razerPayload.xRazerAccessToken,
+        'x-razer-fpid': razerPayload.xRazerFpid || '',
+        'x-razer-razerid': razerPayload.xRazerRazerid || '',
+        'cookie': razerPayload.cookieHeader,
+        'Referer': `https://gold.razer.com/global/en/transaction/zSilver/${transactionId}`,
+      },
+      validateStatus: () => true,
+    });
+    if (res.status !== 200) return { email, transactionId, success: false, error: `Receipt error (${res.status}): ${JSON.stringify(res.data)}` };
+    return { email, transactionId, success: true, receipt: res.data };
+  } catch (err) {
+    return { email, transactionId, success: false, error: `Receipt fetch failed: ${err.message}` };
+  }
+}
+
+async function bulkRedeemSilver(accounts, product, { batchSize = 50, country = 'United States' } = {}) {
+  const start = Date.now();
+
+  const dedicatedProxies = PROXY_LIST.filter(p => !p.disabled && p.dedicated && p.country.toLowerCase() === country.toLowerCase());
+  const sharedProxies    = getProxiesByCountry(country).filter(p => !p.dedicated);
+
+  console.log(`[bulkRedeem] country=${country} dedicated=${dedicatedProxies.map(p => p.label).join(', ')} shared=${sharedProxies.map(p => p.label).join(', ')}`);
+
+  // Process a chunk of accounts through a specific proxy pool in batches
+  async function processChunk(chunkAccounts, proxyPool) {
+    const chunkResults = [];
+    for (let i = 0; i < chunkAccounts.length; i += batchSize) {
+      const batch = chunkAccounts.slice(i, i + batchSize);
+      const settled = await Promise.allSettled(
+        batch.map((account, batchIdx) => {
+          const stagger = batchIdx * 200;
+          return new Promise(r => setTimeout(r, stagger))
+            .then(() => redeemSilverOne(account, product, assignProxy(i + batchIdx, proxyPool)));
+        })
+      );
+      settled.forEach((r, idx) => {
+        chunkResults.push(
+          r.status === 'fulfilled'
+            ? r.value
+            : { email: batch[idx].email, success: false, error: r.reason?.message || 'Unknown error' }
+        );
+      });
+      if (i + batchSize < chunkAccounts.length) await new Promise(r => setTimeout(r, 1000));
+    }
+    return chunkResults;
+  }
+
+  // Phase 1 — dedicated proxies get exactly 40 accounts each, remainder splits across shared proxies
+  // All chunks run in parallel
+  const DEDICATED_CAP = 40;
+  let phase1 = [];
+
+  const chunks = [];
+
+  // Assign up to DEDICATED_CAP accounts to each dedicated proxy
+  let cursor = 0;
+  for (const proxy of dedicatedProxies) {
+    if (cursor >= accounts.length) break;
+    const slice = accounts.slice(cursor, cursor + DEDICATED_CAP);
+    chunks.push({ proxy: [proxy], accounts: slice, label: proxy.label });
+    cursor += slice.length;
+  }
+
+  // Remaining accounts split evenly across shared proxies
+  const remaining = accounts.slice(cursor);
+  if (remaining.length > 0) {
+    const pool = sharedProxies.length ? sharedProxies : PROXY_LIST.filter(p => !p.disabled);
+    if (pool.length > 0) {
+      const perProxy = Math.ceil(remaining.length / pool.length);
+      let rCursor = 0;
+      for (const proxy of pool) {
+        if (rCursor >= remaining.length) break;
+        const slice = remaining.slice(rCursor, rCursor + perProxy);
+        chunks.push({ proxy: [proxy], accounts: slice, label: proxy.label });
+        rCursor += slice.length;
+      }
+    } else {
+      // No proxies at all — run remaining without proxy
+      chunks.push({ proxy: [], accounts: remaining, label: 'no-proxy' });
+    }
+  }
+
+  console.log(`[bulkRedeem] Sequential chunks: ${chunks.map(c => `${c.label}×${c.accounts.length}`).join(' | ')}`);
+
+  for (const chunk of chunks) {
+    const chunkResults = await processChunk(chunk.accounts, chunk.proxy);
+    phase1.push(...chunkResults);
+  }
+
+  const phase1Elapsed = ((Date.now() - start) / 1000).toFixed(1);
+  const successful = phase1.filter(r => r.success && r.transactionId);
+  const failed = phase1.filter(r => !r.success);
+  console.log(`[bulkRedeem] Phase 1: ${successful.length} redeemed, ${failed.length} failed in ${phase1Elapsed}s`);
+
+  // Phase 2 — fetch all receipts in parallel (read-only, safe to fire all at once)
+  const receiptSettled = await Promise.allSettled(successful.map(r => fetchReceiptOne(r)));
+  const receipts = receiptSettled.map((r, idx) =>
+    r.status === 'fulfilled'
+      ? r.value
+      : { email: successful[idx].email, transactionId: successful[idx].transactionId, success: false, error: r.reason?.message }
+  );
+
+  const elapsed = ((Date.now() - start) / 1000).toFixed(1);
+  return {
+    total: accounts.length,
+    redeemed: successful.length,
+    receiptsOk: receipts.filter(r => r.success).length,
+    failed: failed.length,
+    elapsed: `${elapsed}s`,
+    phase1Elapsed: `${phase1Elapsed}s`,
+    proxiesUsed: chunks.map(c => `${c.label} ×${c.accounts.length}`),
+    results: [
+      // Phase 2 results — redeemed accounts with receipt or receipt-fetch error
+      ...receipts.map(r => ({
+        email: r.email,
+        transactionId: r.transactionId,
+        success: r.success,
+        receipt: r.receipt || null,
+        error: r.error || null,
+      })),
+      // Phase 1 failures — redeem itself failed
+      ...failed.map(f => ({
+        email: f.email,
+        transactionId: null,
+        success: false,
+        receipt: null,
+        error: f.error,
+      })),
+    ],
+  };
+}
+
+async function checkProxyHealth() {
+  const { buildAxiosWithProxy } = require('../../utils/proxyAxios');
+  const TEST_URL = `https://razerid.razer.com/api/?ping=${Date.now()}`;
+
+  const results = await Promise.allSettled(
+    PROXY_LIST.filter(p => !p.disabled).map(async (proxy) => {
+      const start = Date.now();
+      try {
+        const instance = buildAxiosWithProxy(proxy.id);
+        const res = await instance.get(TEST_URL, {
+          headers: {
+            'accept': 'application/json',
+            'accept-language': 'en-US,en;q=0.9',
+            'x-razer-language': 'en',
+            'Referer': 'https://gold.razer.com/',
+          },
+          validateStatus: () => true,
+          timeout: 10000,
+        });
+        const elapsed = Date.now() - start;
+        return {
+          id: proxy.id,
+          label: proxy.label,
+          country: proxy.country,
+          dedicated: !!proxy.dedicated,
+          status: res.status,
+          ok: res.status === 200,
+          ms: elapsed,
+        };
+      } catch (err) {
+        return {
+          id: proxy.id,
+          label: proxy.label,
+          country: proxy.country,
+          dedicated: !!proxy.dedicated,
+          status: null,
+          ok: false,
+          ms: Date.now() - start,
+          error: err.message,
+        };
+      }
+    })
+  );
+
+  return results.map(r => r.status === 'fulfilled' ? r.value : r.reason);
+}
+
+module.exports = { loadAccounts, authenticateAccounts, transactAccounts, checkBalanceAccounts, getProductBalance, getSilverBalances, bulkRedeemSilver, checkProxyHealth };
