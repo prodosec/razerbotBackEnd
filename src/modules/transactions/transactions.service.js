@@ -2,6 +2,7 @@ const TransactionBatchTest = require('./transactionTest.model');
 const CompletedBatch = require('./completedBatch.model');
 const { TransactionsManager, MAX_CONCURRENCY, ALLOWED_MODES } = require('./transactions.manager');
 const RazerPayloadData = require('../auth/razerPayloadData.model');
+const { getAxiosForUser } = require('../../utils/proxyAxios');
 
 const manager = new TransactionsManager();
 
@@ -106,6 +107,8 @@ async function processWithRazerMode({ userId, itemIndex, payload }) {
   console.log(`${tag} otp_token (cookie, first 20): ${String(payload.otp_token).slice(0, 20)}...`);
   console.log(`${tag} rawToken (body, 6-digit): ${payload.rawToken}`);
 
+  const axiosInstance = await getAxiosForUser(userId);
+
   // Exact headers matching browser request
   const headers = {
     'accept': 'application/json, text/plain, */*',
@@ -140,28 +143,24 @@ async function processWithRazerMode({ userId, itemIndex, payload }) {
 
   let checkoutRes;
   try {
-    checkoutRes = await fetch('https://gold.razer.com/api/webshop/checkout/gold', {
-      method: 'POST',
+    checkoutRes = await axiosInstance.post('https://gold.razer.com/api/webshop/checkout/gold', checkoutBody, {
       headers,
-      body: JSON.stringify(checkoutBody),
-      redirect: 'manual',
+      validateStatus: () => true,
     });
   } catch (fetchErr) {
-    console.error(`${tag} ERROR: fetch to checkout endpoint failed (network/DNS):`, fetchErr.message);
+    console.error(`${tag} ERROR: request to checkout endpoint failed (network/DNS):`, fetchErr.message);
     throw fetchErr;
   }
 
   console.log(`${tag} Checkout response status:`, checkoutRes.status);
-  console.log(`${tag} Checkout response headers:`, Object.fromEntries(checkoutRes.headers.entries()));
-  console.log(`${tag} Checkout response redirected:`, checkoutRes);
-  if (!checkoutRes.ok) {
-    const bodyText = await checkoutRes.text().catch(() => '(could not read body)');
-    console.error(`${tag} ERROR: Checkout failed with status ${checkoutRes.status}. Body:`, bodyText);
-    throw new Error(`Checkout failed with status ${checkoutRes.status}. Body: ${bodyText}`);
+  console.log(`${tag} Checkout response headers:`, checkoutRes.headers);
+  if (checkoutRes.status < 200 || checkoutRes.status >= 300) {
+    console.error(`${tag} ERROR: Checkout failed with status ${checkoutRes.status}. Body:`, checkoutRes.data);
+    throw new Error(`Checkout failed with status ${checkoutRes.status}. Body: ${JSON.stringify(checkoutRes.data)}`);
   }
 
   // Checkout returns 200 with JSON body containing transactionNumber and paymentUrl
-  const checkoutResponse = await checkoutRes.json();
+  const checkoutResponse = checkoutRes.data;
   console.log(`${tag} Checkout response body:`, checkoutResponse);
 
   const transactionId = checkoutResponse.transactionNumber;
@@ -179,8 +178,7 @@ async function processWithRazerMode({ userId, itemIndex, payload }) {
 
   let resultRes;
   try {
-    resultRes = await fetch(`https://gold.razer.com/api/webshopv2/${transactionId}`, {
-      method: 'GET',
+    resultRes = await axiosInstance.get(`https://gold.razer.com/api/webshopv2/${transactionId}`, {
       headers: {
         'accept': 'application/json, text/plain, */*',
         'accept-language': 'en-US,en;q=0.9',
@@ -193,26 +191,20 @@ async function processWithRazerMode({ userId, itemIndex, payload }) {
         'cookie': razerPayload.cookieHeader,
         'Referer': `https://gold.razer.com/global/en/gold/purchase/transaction/${transactionId}`,
       },
+      validateStatus: () => true,
     });
   } catch (fetchErr) {
-    console.error(`${tag} ERROR: fetch to transaction result endpoint failed (network/DNS):`, fetchErr.message);
+    console.error(`${tag} ERROR: request to transaction result endpoint failed (network/DNS):`, fetchErr.message);
     throw fetchErr;
   }
 
   console.log(`${tag} Transaction result status:`, resultRes.status);
 
-  let resultData;
-  try {
-    resultData = await resultRes.json();
-  } catch (jsonErr) {
-    const raw = await resultRes.text().catch(() => '(could not read body)');
-    console.error(`${tag} ERROR: Failed to parse transaction result as JSON. Raw body:`, raw);
-    throw new Error(`Transaction result is not valid JSON. Raw: ${raw}`);
-  }
+  const resultData = resultRes.data;
 
   console.log(`${tag} Transaction result data:`, JSON.stringify(resultData, null, 2));
 
-  if (!resultRes.ok) {
+  if (resultRes.status < 200 || resultRes.status >= 300) {
     console.error(`${tag} ERROR: Transaction result returned non-2xx status ${resultRes.status}:`, resultData);
     throw new Error(`Transaction result HTTP ${resultRes.status}: ${JSON.stringify(resultData)}`);
   }

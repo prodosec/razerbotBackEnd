@@ -33,24 +33,48 @@ function buildAxiosWithProxy(proxyId) {
   const pass = proxy?.password || WEBSHARE_PASS;
 
   if (!proxy || !user || !pass) {
+    console.warn(`[proxy] No proxy credentials found for proxyId ${proxyId} — using direct connection`);
     return axios;
   }
 
   const proxyUrl = `http://${user}:${pass}@${proxy.ip}:${proxy.port}`;
+  console.log(`[proxy] Using proxy: ${proxy.label} | ${proxy.ip}:${proxy.port} | ${proxy.country}`);
+
   const agent = new HttpsProxyAgent(proxyUrl);
 
-  return axios.create({
+  const instance = axios.create({
     httpAgent: agent,
     httpsAgent: agent,
     timeout: 15000,
   });
+
+  instance.interceptors.response.use(
+    (res) => {
+      console.log(`[proxy] ${res.config.method?.toUpperCase()} ${res.config.url} → ${res.status} (via ${proxy.ip})`);
+      return res;
+    },
+    (err) => {
+      const url = err.config?.url || 'unknown';
+      const code = err.code || 'unknown';
+      console.error(`[proxy] ERROR ${url} via ${proxy.ip}:${proxy.port} — code: ${code} — ${err.message}`);
+      return Promise.reject(err);
+    }
+  );
+
+  return instance;
 }
 
 async function getAxiosForUser(userId) {
   const mongoose = require('mongoose');
   const User = mongoose.model('RegisteredUser');
   const user = await User.findById(userId).select('proxyId').lean();
-  return buildAxiosWithProxy(user?.proxyId ?? DEFAULT_PROXY_ID);
+  const proxyId = user?.proxyId ?? null;
+  console.log(`[proxy] getAxiosForUser userId=${userId} proxyId=${proxyId}`);
+  if (proxyId === null || proxyId === undefined) {
+    console.log(`[proxy] No proxy assigned — using server's own IP`);
+    return axios;
+  }
+  return buildAxiosWithProxy(proxyId);
 }
 
 module.exports = { getAxiosForUser, buildAxiosWithProxy, PROXY_LIST, DEFAULT_PROXY_ID };

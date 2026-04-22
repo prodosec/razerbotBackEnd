@@ -238,6 +238,7 @@ class TransactionsManager {
 
     this.emit(job, 'transactions:completed', {
       message: 'Batch job completed',
+      transactions: [...job.lastResults],
     });
 
     if (typeof job.onCompletedFn === 'function') {
@@ -266,6 +267,7 @@ class TransactionsManager {
 
     this.emit(job, 'transactions:stopped', {
       message: 'Batch job stopped',
+      transactions: [...job.lastResults],
     });
 
     if (typeof job.onCompletedFn === 'function') {

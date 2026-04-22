@@ -1,6 +1,7 @@
 const axios = require('axios');
 const Wallet = require('./wallet.model');
 const RazerPayloadData = require('../auth/razerPayloadData.model');
+const { getAxiosForUser } = require('../../utils/proxyAxios');
 
 const DEFAULT_RAZER_GOLD_URL = process.env.RAZER_GOLD_URL || 'https://gold.razer.com/pk/en';
 
@@ -90,13 +91,62 @@ async function updateWalletBalance(userId, razerAccessToken) {
   }
 }
 
-async function fetchRazerWalletBalances(userId) {
-  const headers = await getStoredRazerHeaders(userId);
+async function refreshAccessToken(userId, axiosInstance) {
+  const payload = await RazerPayloadData.findOne({ userId });
+  if (!payload) return null;
 
-  const [responseSilver, responseGold] = await Promise.all([
-    axios.get('https://gold.razer.com/api/silver/wallet', { headers }),
-    axios.get('https://gold.razer.com/api/gold/balance', { headers }),
+  const SSO_CLIENT_ID = process.env.LAST_CLIENT_ID_PASSED || '63c74d17e027dc11f642146bfeeaee09c3ce23d8';
+  try {
+    const res = await axiosInstance.post(
+      'https://oauth2.razer.com/services/sso',
+      new URLSearchParams({ client_id: SSO_CLIENT_ID, client_key: 'enZhdWx0', scope: 'sso cop' }).toString(),
+      {
+        headers: {
+          'accept': 'application/json, text/plain, */*',
+          'content-type': 'application/x-www-form-urlencoded',
+          'cookie': payload.cookieHeader || '',
+          'Origin': 'https://gold.razer.com',
+          'Referer': 'https://gold.razer.com/',
+        },
+        validateStatus: () => true,
+      }
+    );
+    const newToken = res.data?.access_token || null;
+    if (newToken) {
+      await RazerPayloadData.findOneAndUpdate({ userId }, { $set: { xRazerAccessToken: newToken, capturedAt: new Date() } });
+      console.log(`[wallet] Access token refreshed for userId=${userId}`);
+    }
+    return newToken;
+  } catch {
+    return null;
+  }
+}
+
+async function fetchRazerWalletBalances(userId) {
+  const [headers, axiosInstance] = await Promise.all([
+    getStoredRazerHeaders(userId),
+    getAxiosForUser(userId),
   ]);
+
+  const doFetch = (h) => Promise.all([
+    axiosInstance.get('https://gold.razer.com/api/silver/wallet', { headers: h, validateStatus: () => true }),
+    axiosInstance.get('https://gold.razer.com/api/gold/balance', { headers: h, validateStatus: () => true }),
+  ]);
+
+  let [responseSilver, responseGold] = await doFetch(headers);
+
+  // If either call returned 401, refresh token and retry once
+  if (responseSilver.status === 401 || responseGold.status === 401) {
+    console.warn(`[wallet] 401 received — refreshing access token for userId=${userId}`);
+    const newToken = await refreshAccessToken(userId, axiosInstance);
+    if (newToken) {
+      headers['x-razer-accesstoken'] = newToken;
+      [responseSilver, responseGold] = await doFetch(headers);
+    }
+  }
+
+  if (responseSilver.status !== 200) throw { status: responseSilver.status, message: `Silver wallet API error (${responseSilver.status})` };
+  if (responseGold.status !== 200) throw { status: responseGold.status, message: `Gold balance API error (${responseGold.status})` };
 
   return {
     silver: responseSilver.data,

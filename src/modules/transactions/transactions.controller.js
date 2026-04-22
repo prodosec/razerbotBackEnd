@@ -2,6 +2,7 @@ const transactionsService = require('./transactions.service');
 const speakeasy = require('speakeasy');
 const RazerPayloadData = require('../auth/razerPayloadData.model');
 const CompletedBatch = require('./completedBatch.model');
+const { getAxiosForUser } = require('../../utils/proxyAxios');
 
 function normalizeMode(mode) {
   if (typeof mode !== 'string') {
@@ -47,11 +48,12 @@ async function generateOTP(req, res, next) {
 
     const clientId = process.env.LAST_CLIENT_ID_PASSED || '63c74d17e027dc11f642146bfeeaee09c3ce23d8';
 
+    const axiosInstance = await getAxiosForUser(req.userId);
+
     // Send to Razer API with exact headers from browser
     let response;
     try {
-      response = await fetch('https://razer-otptoken-service.razer.com/totp/post', {
-        method: 'POST',
+      response = await axiosInstance.post('https://razer-otptoken-service.razer.com/totp/post', { client_id: clientId, token }, {
         headers: {
           'accept': 'application/json, text/plain, */*',
           'accept-language': 'en-US,en;q=0.9',
@@ -63,27 +65,24 @@ async function generateOTP(req, res, next) {
           'cookie': razerPayload.cookieHeader,
           'Referer': 'https://razerid.razer.com/',
         },
-        body: JSON.stringify({ client_id: clientId,  token }),
+        validateStatus: () => true,
       });
     } catch (fetchErr) {
-      console.error('[generateOTP] ERROR: fetch to OTP endpoint failed (network/DNS):', fetchErr.message);
+      console.error('[generateOTP] ERROR: request to OTP endpoint failed (network/DNS):', fetchErr.message);
       throw fetchErr;
     }
 
-
-    // Read body for both debugging and extracting body otpToken
-    const responseBodyText = await response.text().catch(() => '(could not read body)');
-
-    if (!response.ok) {
-      console.error(`[generateOTP] ERROR: OTP endpoint returned ${response.status}:`, responseBodyText);
+    if (response.status < 200 || response.status >= 300) {
+      console.error(`[generateOTP] ERROR: OTP endpoint returned ${response.status}:`, response.data);
       return res.status(400).json({
         success: false,
-        message: `Razer OTP service rejected the token (status ${response.status}): ${responseBodyText}`,
+        message: `Razer OTP service rejected the token (status ${response.status}): ${JSON.stringify(response.data)}`,
       });
     }
 
     // Extract _rzrotptoken and _rzrotptokents from set-cookie
-    const setCookieHeader = response.headers.get('set-cookie') || '';
+    const rawSetCookie = response.headers['set-cookie'];
+    const setCookieHeader = Array.isArray(rawSetCookie) ? rawSetCookie.join('; ') : (rawSetCookie || '');
 
     const rzrotptokenMatch = setCookieHeader.match(/_rzrotptoken=([^;]+)/);
     const rzrotptoken = rzrotptokenMatch ? rzrotptokenMatch[1] : null;
@@ -100,17 +99,10 @@ async function generateOTP(req, res, next) {
     }
 
     // Parse response body
-    let otp_token_enc = null;
-    let otp_token = null;
-    let create_ts = null;
-    try {
-      const body = JSON.parse(responseBodyText);
-      otp_token_enc = body.otp_token_enc || null;
-      otp_token = body.otp_token || null;
-      create_ts = body.create_ts || null;
-    } catch {
-      console.warn('[generateOTP] Could not parse response body as JSON');
-    }
+    const responseBody = response.data || {};
+    const otp_token_enc = responseBody.otp_token_enc || null;
+    const otp_token = responseBody.otp_token || null;
+    const create_ts = responseBody.create_ts || null;
 
     console.log('[generateOTP] rzrotptoken (first 20):', rzrotptoken.slice(0, 20) + '...');
     console.log('[generateOTP] rzrotptokenTs:', rzrotptokenTs);
