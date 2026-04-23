@@ -122,6 +122,31 @@ async function refreshAccessToken(userId, axiosInstance) {
   }
 }
 
+async function fetchGoldBalance(userId) {
+  const [headers, axiosInstance] = await Promise.all([
+    getStoredRazerHeaders(userId),
+    getAxiosForUser(userId),
+  ]);
+
+  const doFetch = (h) =>
+    axiosInstance.get('https://gold.razer.com/api/gold/balance', { headers: h, validateStatus: () => true });
+
+  let response = await doFetch(headers);
+
+  if (response.status === 401) {
+    console.warn(`[wallet] 401 received — refreshing access token for userId=${userId}`);
+    const newToken = await refreshAccessToken(userId, axiosInstance);
+    if (newToken) {
+      headers['x-razer-accesstoken'] = newToken;
+      response = await doFetch(headers);
+    }
+  }
+
+  if (response.status !== 200) throw { status: response.status, message: `Gold balance API error (${response.status})` };
+
+  return response.data;
+}
+
 async function fetchRazerWalletBalances(userId) {
   const [headers, axiosInstance] = await Promise.all([
     getStoredRazerHeaders(userId),
@@ -160,5 +185,6 @@ module.exports = {
   fetchRazerBalance,
   updateWalletBalance,
   fetchRazerWalletBalances,
+  fetchGoldBalance,
   getStoredRazerHeaders,
 };

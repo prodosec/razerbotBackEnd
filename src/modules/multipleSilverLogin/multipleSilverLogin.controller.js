@@ -1,4 +1,4 @@
-const { loadAccounts, authenticateAccounts, transactAccounts, getProductBalance, getSilverBalances, bulkRedeemSilver, checkProxyHealth } = require('./multipleSilverLogin.service');
+const { loadAccounts, authenticateAccounts, transactAccounts, getProductBalance, getSilverBalances, getGoldBalances, bulkRedeemSilver, checkProxyHealth } = require('./multipleSilverLogin.service');
 const RazerPayloadData = require('../auth/razerPayloadData.model');
 const SilverMultipleTransaction = require('./silverMultipleTransaction.model');
 const logStore = require('../../utils/logStore');
@@ -186,6 +186,19 @@ async function bulkSilverBalance(req, res, next) {
   }
 }
 
+async function bulkGoldBalance(req, res, next) {
+  try {
+    const { accounts, emails } = req.body;
+    const emailList = accounts?.length
+      ? accounts.map(a => a.email)
+      : (emails || []);
+    const result = await getGoldBalances(emailList);
+    res.json({ success: true, ...result });
+  } catch (err) {
+    next(err);
+  }
+}
+
 async function bulkSilverRedeem(req, res, next) {
   try {
     const { accounts, product, country, batchSize } = req.body;
@@ -243,4 +256,4 @@ async function clearLogs(req, res) {
   res.json({ success: true, message: 'Logs cleared' });
 }
 
-module.exports = { bulkLoad, bulkLoadStream, bulkAuthenticate, debugPayload, bulkTransact, productBalance, bulkSilverBalance, bulkSilverRedeem, getLogs, clearLogs, proxyHealth };
+module.exports = { bulkLoad, bulkLoadStream, bulkAuthenticate, debugPayload, bulkTransact, productBalance, bulkSilverBalance, bulkGoldBalance, bulkSilverRedeem, getLogs, clearLogs, proxyHealth };

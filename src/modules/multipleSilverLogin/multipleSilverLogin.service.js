@@ -539,6 +539,83 @@ async function getSilverBalanceOne(email, proxy = null) {
   return { email, success: true, balance: res.data };
 }
 
+async function getGoldBalanceOne(email, proxy = null) {
+  const razerPayload = await RazerPayloadData.findOne({ email }).sort({ capturedAt: -1 });
+  if (!razerPayload) return { email, success: false, error: 'Account not loaded' };
+
+  let axiosInstance;
+  if (proxy) {
+    const { buildAxiosWithProxy } = require('../../utils/proxyAxios');
+    axiosInstance = buildAxiosWithProxy(proxy.id);
+  } else {
+    axiosInstance = await getAxiosForUser(razerPayload.userId);
+  }
+
+  const doFetch = () => axiosInstance.get('https://gold.razer.com/api/gold/balance', {
+    headers: {
+      'accept': 'application/json, text/plain, */*',
+      'accept-language': 'en-US,en;q=0.9',
+      'cache-control': 'no-cache',
+      'pragma': 'no-cache',
+      'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+      'x-razer-accesstoken': razerPayload.xRazerAccessToken,
+      'x-razer-fpid': razerPayload.xRazerFpid || '',
+      'x-razer-razerid': razerPayload.xRazerRazerid || '',
+      'x-razer-language': 'en',
+      'cookie': razerPayload.cookieHeader,
+      'Referer': 'https://gold.razer.com/global/en',
+    },
+    validateStatus: () => true,
+  });
+
+  let res = await doFetch();
+
+  if (res.status === 401) {
+    const newToken = await refreshAccessToken(razerPayload);
+    if (newToken) res = await doFetch();
+  }
+
+  if (res.status !== 200) return { email, success: false, error: `API error (${res.status}): ${JSON.stringify(res.data)}` };
+
+  return { email, success: true, balance: res.data };
+}
+
+async function getGoldBalances(emails, { batchSize = 50, onProgress } = {}) {
+  const list = emails?.length
+    ? emails
+    : (await RazerPayloadData.find({}).distinct('email'));
+
+  const start = Date.now();
+  const proxies = getRotatingProxies(9);
+  const results = [];
+
+  for (let i = 0; i < list.length; i += batchSize) {
+    const batch = list.slice(i, i + batchSize);
+
+    const batchResults = await Promise.allSettled(
+      batch.map((email, batchIdx) => {
+        const stagger = batchIdx * 120;
+        return new Promise(r => setTimeout(r, stagger))
+          .then(() => getGoldBalanceOne(email, assignProxy(i + batchIdx, proxies)));
+      })
+    );
+
+    batchResults.forEach((r, idx) => {
+      const result = r.status === 'fulfilled'
+        ? r.value
+        : { email: batch[idx], success: false, error: r.reason?.message || 'Unknown error' };
+      results.push(result);
+      if (onProgress) onProgress(result, results.length, list.length);
+    });
+
+    if (i + batchSize < list.length) await new Promise(r => setTimeout(r, 500));
+  }
+
+  const elapsed = ((Date.now() - start) / 1000).toFixed(1);
+  const successCount = results.filter(r => r.success).length;
+  return { total: list.length, success: successCount, failed: list.length - successCount, elapsed: `${elapsed}s`, results };
+}
+
 async function getSilverBalances(emails, { batchSize = 50, onProgress } = {}) {
   const list = emails?.length
     ? emails
@@ -824,4 +901,4 @@ async function checkProxyHealth() {
   return results.map(r => r.status === 'fulfilled' ? r.value : r.reason);
 }
 
-module.exports = { loadAccounts, authenticateAccounts, transactAccounts, checkBalanceAccounts, getProductBalance, getSilverBalances, bulkRedeemSilver, checkProxyHealth };
+module.exports = { loadAccounts, authenticateAccounts, transactAccounts, checkBalanceAccounts, getProductBalance, getSilverBalances, getGoldBalances, bulkRedeemSilver, checkProxyHealth };

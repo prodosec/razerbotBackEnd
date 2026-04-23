@@ -15,6 +15,7 @@ const auth = require('../../middleware/auth');
  * @access Private
  */
 router.get('/silver', auth, walletController.getSilverWallet);
+router.get('/gold', auth, walletController.getGoldBalance);
 
 /**
  * @route GET /api/wallet/summary

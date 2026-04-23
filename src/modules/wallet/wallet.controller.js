@@ -48,7 +48,22 @@ async function getSilverWallet(req, res, next) {
 
 
 
+async function getGoldBalance(req, res, next) {
+  try {
+    const data = await walletService.fetchGoldBalance(req.userId);
+
+    return res.json({
+      success: true,
+      message: 'Gold balance fetched successfully',
+      data,
+    });
+  } catch (err) {
+    next(err);
+  }
+}
+
 module.exports = {
   refreshBalance,
   getSilverWallet,
+  getGoldBalance,
 };

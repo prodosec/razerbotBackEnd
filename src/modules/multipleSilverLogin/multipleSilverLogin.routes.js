@@ -31,6 +31,10 @@ router.get('/debug/:email', auth, controller.debugPayload);
 // Body: { emails?: ["email1", "email2"] }  — omit emails to fetch all loaded accounts
 router.post('/silver-balances', auth, controller.bulkSilverBalance);
 
+// POST /api/multiple-silver-login/gold-balances
+// Body: { emails?: ["email1", "email2"] }  — omit emails to fetch all loaded accounts
+router.post('/gold-balances', auth, controller.bulkGoldBalance);
+
 // POST /api/multiple-silver-login/silver-redeem
 // Body: { accounts: [{ email, rzrotptoken, rzrotptokenTs, otp_token_enc, otp_token }], product: { zSilver_id, region_id, silver_reward_id, amount, permalink, country }, batchSize? }
 router.post('/silver-redeem', auth, controller.bulkSilverRedeem);
