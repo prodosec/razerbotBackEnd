@@ -1,5 +1,6 @@
 const TransactionBatchTest = require('./transactionTest.model');
 const CompletedBatch = require('./completedBatch.model');
+const GoldMultipleAccountBatch = require('./goldMultipleAccountBatch.model');
 const { TransactionsManager, MAX_CONCURRENCY, ALLOWED_MODES } = require('./transactions.manager');
 const RazerPayloadData = require('../auth/razerPayloadData.model');
 const { getAxiosForUser } = require('../../utils/proxyAxios');
@@ -86,18 +87,24 @@ async function processWithRazerMode({ userId, itemIndex, payload }) {
     throw new Error(msg);
   }
 
-  // Load saved Razer headers for this user
+  // Multi-account jobs pass `email` in the payload; look up that account's saved session.
+  // Single-account jobs fall back to the job-owner's session via userId.
   let razerPayload;
   try {
-    razerPayload = await RazerPayloadData.findOne({ userId });
+    if (payload.email) {
+      razerPayload = await RazerPayloadData.findOne({ email: payload.email }).sort({ capturedAt: -1 });
+    } else {
+      razerPayload = await RazerPayloadData.findOne({ userId });
+    }
   } catch (dbErr) {
     console.error(`${tag} ERROR: DB lookup for RazerPayloadData failed:`, dbErr.message);
     throw dbErr;
   }
 
   if (!razerPayload) {
-    console.error(`${tag} ERROR: No RazerPayloadData found for userId ${userId}`);
-    throw new Error(`No Razer session found for user ${userId}. Please log in again.`);
+    const who = payload.email ? `email ${payload.email}` : `userId ${userId}`;
+    console.error(`${tag} ERROR: No RazerPayloadData found for ${who}`);
+    throw new Error(`No Razer session found for ${who}. Please log in again.`);
   }
 
   console.log(`${tag} RazerPayload loaded — razerid: ${razerPayload.xRazerRazerid}, fpid: ${razerPayload.xRazerFpid}`);
@@ -107,7 +114,8 @@ async function processWithRazerMode({ userId, itemIndex, payload }) {
   console.log(`${tag} otp_token (cookie, first 20): ${String(payload.otp_token).slice(0, 20)}...`);
   console.log(`${tag} rawToken (body, 6-digit): ${payload.rawToken}`);
 
-  const axiosInstance = await getAxiosForUser(userId);
+  // Route requests through the owning account's proxy (falls back to job-owner's proxy for single-account).
+  const axiosInstance = await getAxiosForUser(razerPayload.userId || userId);
 
   // Exact headers matching browser request
   const headers = {
@@ -262,6 +270,37 @@ async function saveCompletedBatch({ jobId, userId, mode, total, counts, complete
   }
 }
 
+async function saveCompletedMultiBatch(payload) {
+  const {
+    jobId, userId, mode, total, counts, completedAt, transactions,
+    accounts, perAccountConcurrency, pausedAccounts, stoppedAccounts,
+  } = payload;
+
+  console.log(`[saveCompletedMultiBatch] jobId: ${jobId}, userId: ${userId}, total: ${total}, accounts: ${accounts?.length}, counts:`, counts);
+  try {
+    await GoldMultipleAccountBatch.findOneAndUpdate(
+      { userId },
+      {
+        jobId,
+        mode,
+        total,
+        counts,
+        accounts: accounts || [],
+        perAccountConcurrency: perAccountConcurrency || 3,
+        pausedAccounts: pausedAccounts || [],
+        stoppedAccounts: stoppedAccounts || [],
+        completedAt,
+        transactions,
+      },
+      { upsert: true, new: true }
+    );
+    console.log(`[saveCompletedMultiBatch] Saved successfully for userId: ${userId}`);
+  } catch (err) {
+    console.error(`[saveCompletedMultiBatch] ERROR: Failed to save for userId ${userId}:`, err.message);
+    throw err;
+  }
+}
+
 function startBatch({ userId, transactions, concurrency, mode }) {
   const selectedMode = ALLOWED_MODES.has(mode) ? mode : 'fake';
 
@@ -273,6 +312,20 @@ function startBatch({ userId, transactions, concurrency, mode }) {
     processFn: ({ jobId, userId: ownerId, itemIndex, payload }) =>
       processTransaction({ mode: selectedMode, jobId, userId: ownerId, itemIndex, payload }),
     onCompletedFn: saveCompletedBatch,
+  });
+}
+
+function startMultiBatch({ userId, accounts, mode }) {
+  const selectedMode = ALLOWED_MODES.has(mode) ? mode : 'fake';
+
+  return manager.createMultiJob({
+    userId,
+    accounts,
+    perAccountConcurrency: 3,
+    mode: selectedMode,
+    processFn: ({ jobId, userId: ownerId, itemIndex, payload }) =>
+      processTransaction({ mode: selectedMode, jobId, userId: ownerId, itemIndex, payload }),
+    onCompletedFn: saveCompletedMultiBatch,
   });
 }
 
@@ -292,12 +345,28 @@ function stopBatch(jobId, userId) {
   return manager.stopJob(jobId, userId);
 }
 
+function pauseAccount(jobId, userId, email) {
+  return manager.pauseAccount(jobId, userId, email);
+}
+
+function resumeAccount(jobId, userId, email) {
+  return manager.resumeAccount(jobId, userId, email);
+}
+
+function stopAccount(jobId, userId, email) {
+  return manager.stopAccount(jobId, userId, email);
+}
+
 module.exports = {
   MAX_CONCURRENCY,
   ALLOWED_MODES,
   startBatch,
+  startMultiBatch,
   getBatch,
   pauseBatch,
   resumeBatch,
   stopBatch,
+  pauseAccount,
+  resumeAccount,
+  stopAccount,
 };

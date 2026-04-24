@@ -6,10 +6,14 @@ function emitTransactionEvent(userId, jobId, eventName, payload) {
     const userRoom = `user:${userId}`;
     const jobRoom = `job:${jobId}`;
 
+    const userClients = io.sockets.adapter.rooms.get(userRoom)?.size ?? 0;
+    const jobClients  = io.sockets.adapter.rooms.get(jobRoom)?.size ?? 0;
+    console.log(`[socket] emit ${eventName} → user:${userId} (${userClients} clients) + job:${jobId.slice(0, 8)} (${jobClients} clients)`);
+
     io.to(userRoom).emit(eventName, payload);
     io.to(jobRoom).emit(eventName, payload);
   } catch (err) {
-    // Socket server might not be initialized in unit tests.
+    console.error('[socket] emit failed:', err.message);
   }
 }
 

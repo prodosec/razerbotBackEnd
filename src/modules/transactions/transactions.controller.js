@@ -2,6 +2,7 @@ const transactionsService = require('./transactions.service');
 const speakeasy = require('speakeasy');
 const RazerPayloadData = require('../auth/razerPayloadData.model');
 const CompletedBatch = require('./completedBatch.model');
+const GoldMultipleAccountBatch = require('./goldMultipleAccountBatch.model');
 const { getAxiosForUser } = require('../../utils/proxyAxios');
 
 function normalizeMode(mode) {
@@ -183,6 +184,100 @@ async function startBatch(req, res, next) {
   }
 }
 
+const MAX_MULTI_ACCOUNTS = 5;
+const PER_ACCOUNT_CONCURRENCY = 3;
+
+async function startMultiBatch(req, res, next) {
+  try {
+    const { transactions, mode } = req.body || {};
+
+    if (!Array.isArray(transactions) || transactions.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'transactions must be a non-empty array',
+      });
+    }
+
+    if (transactions.length > MAX_MULTI_ACCOUNTS) {
+      return res.status(400).json({
+        success: false,
+        message: `A maximum of ${MAX_MULTI_ACCOUNTS} accounts is allowed per multi-account batch`,
+      });
+    }
+
+    const requiredFields = ['email', 'productId', 'regionId', 'paymentChannelId', 'permalink', 'rzrotptoken', 'rzrotptokenTs', 'otp_token_enc', 'otp_token'];
+
+    const seenEmails = new Set();
+    const accounts = [];
+
+    for (let i = 0; i < transactions.length; i += 1) {
+      const tx = transactions[i];
+      if (!tx || typeof tx !== 'object') {
+        return res.status(400).json({
+          success: false,
+          message: `transactions[${i}] must be an object`,
+        });
+      }
+
+      const missing = requiredFields.filter((f) => tx[f] === undefined || tx[f] === null || tx[f] === '');
+      if (missing.length > 0) {
+        return res.status(400).json({
+          success: false,
+          message: `transactions[${i}] is missing required fields: ${missing.join(', ')}`,
+        });
+      }
+
+      const email = String(tx.email).trim().toLowerCase();
+      if (seenEmails.has(email)) {
+        return res.status(400).json({
+          success: false,
+          message: `Duplicate email in transactions: ${email}`,
+        });
+      }
+      seenEmails.add(email);
+
+      const parsedCount = Number(tx.count);
+      if (!Number.isInteger(parsedCount) || parsedCount < 1) {
+        return res.status(400).json({
+          success: false,
+          message: `transactions[${i}].count must be a positive integer`,
+        });
+      }
+
+      const { count, ...template } = tx;
+      const expanded = Array.from({ length: parsedCount }, () => ({ ...template }));
+
+      accounts.push({ email, transactions: expanded });
+    }
+
+    const normalizedMode = normalizeMode(mode);
+    if (!transactionsService.ALLOWED_MODES.has(normalizedMode)) {
+      return res.status(400).json({
+        success: false,
+        message: `mode must be one of: ${Array.from(transactionsService.ALLOWED_MODES).join(', ')}`,
+      });
+    }
+
+    const data = transactionsService.startMultiBatch({
+      userId: req.userId,
+      accounts,
+      mode: normalizedMode,
+    });
+
+    return res.status(202).json({
+      success: true,
+      message: 'Multi-account batch started successfully',
+      data: {
+        ...data,
+        perAccountConcurrency: PER_ACCOUNT_CONCURRENCY,
+        maxAccounts: MAX_MULTI_ACCOUNTS,
+      },
+    });
+  } catch (err) {
+    next(err);
+  }
+}
+
 async function getBatchStatus(req, res, next) {
   try {
     const data = transactionsService.getBatch(req.params.jobId, req.userId);
@@ -262,6 +357,79 @@ async function stopBatch(req, res, next) {
       message: 'Batch stop requested successfully',
       data,
     });
+  } catch (err) {
+    next(err);
+  }
+}
+
+function handleAccountControlResult(res, data, successMessage) {
+  if (!data) {
+    return res.status(404).json({
+      success: false,
+      message: 'Multi-account batch job not found',
+    });
+  }
+  if (data.error === 'ACCOUNT_NOT_IN_BATCH') {
+    return res.status(400).json({
+      success: false,
+      message: 'Account is not part of this batch',
+    });
+  }
+  if (data.error === 'ACCOUNT_ALREADY_STOPPED') {
+    return res.status(400).json({
+      success: false,
+      message: 'Account is already stopped; resume is not allowed',
+    });
+  }
+  return res.json({
+    success: true,
+    message: successMessage,
+    data,
+  });
+}
+
+function readAccountEmail(req) {
+  const raw = req.params && req.params.email;
+  if (typeof raw !== 'string' || raw.trim() === '') {
+    return null;
+  }
+  return decodeURIComponent(raw).trim().toLowerCase();
+}
+
+async function pauseAccountInBatch(req, res, next) {
+  try {
+    const email = readAccountEmail(req);
+    if (!email) {
+      return res.status(400).json({ success: false, message: 'email path param is required' });
+    }
+    const data = transactionsService.pauseAccount(req.params.jobId, req.userId, email);
+    return handleAccountControlResult(res, data, `Account ${email} paused`);
+  } catch (err) {
+    next(err);
+  }
+}
+
+async function resumeAccountInBatch(req, res, next) {
+  try {
+    const email = readAccountEmail(req);
+    if (!email) {
+      return res.status(400).json({ success: false, message: 'email path param is required' });
+    }
+    const data = transactionsService.resumeAccount(req.params.jobId, req.userId, email);
+    return handleAccountControlResult(res, data, `Account ${email} resumed`);
+  } catch (err) {
+    next(err);
+  }
+}
+
+async function stopAccountInBatch(req, res, next) {
+  try {
+    const email = readAccountEmail(req);
+    if (!email) {
+      return res.status(400).json({ success: false, message: 'email path param is required' });
+    }
+    const data = transactionsService.stopAccount(req.params.jobId, req.userId, email);
+    return handleAccountControlResult(res, data, `Account ${email} stopped`);
   } catch (err) {
     next(err);
   }
@@ -418,15 +586,76 @@ async function deleteProgress(req, res, next) {
   }
 }
 
+async function getMultiProgress(req, res, next) {
+  try {
+    const data = await GoldMultipleAccountBatch.findOne({ userId: req.userId });
+
+    if (!data) {
+      return res.status(404).json({
+        success: false,
+        message: 'No multi-account batch found. Start a multi-account batch first.',
+      });
+    }
+
+    const { transactions, ...rest } = data.toObject();
+    const summaryPerAccount = {};
+    for (const email of rest.accounts || []) {
+      summaryPerAccount[email] = { total: 0, success: 0, reviewing: 0, failed: 0 };
+    }
+    for (const tx of transactions || []) {
+      const email = tx.accountEmail;
+      if (!email || !summaryPerAccount[email]) continue;
+      summaryPerAccount[email].total += 1;
+      if (tx.status === 'success') summaryPerAccount[email].success += 1;
+      else if (tx.status === 'reviewing') summaryPerAccount[email].reviewing += 1;
+      else if (tx.status === 'failed') summaryPerAccount[email].failed += 1;
+    }
+
+    return res.json({
+      success: true,
+      message: 'Multi-account batch fetched successfully',
+      data: { ...rest, summaryPerAccount, transactions },
+    });
+  } catch (err) {
+    next(err);
+  }
+}
+
+async function deleteMultiProgress(req, res, next) {
+  try {
+    const deleted = await GoldMultipleAccountBatch.findOneAndDelete({ userId: req.userId });
+
+    if (!deleted) {
+      return res.status(404).json({
+        success: false,
+        message: 'No multi-account batch found to delete.',
+      });
+    }
+
+    return res.json({
+      success: true,
+      message: 'Multi-account batch deleted successfully.',
+    });
+  } catch (err) {
+    next(err);
+  }
+}
+
 module.exports = {
   generateOTP,
   getTransactionHistory,
   getPinHistory,
   getProgress,
   deleteProgress,
+  getMultiProgress,
+  deleteMultiProgress,
   startBatch,
+  startMultiBatch,
   getBatchStatus,
   pauseBatch,
   resumeBatch,
   stopBatch,
+  pauseAccountInBatch,
+  resumeAccountInBatch,
+  stopAccountInBatch,
 };
