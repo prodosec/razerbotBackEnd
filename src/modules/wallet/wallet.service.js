@@ -133,8 +133,8 @@ async function fetchGoldBalance(userId) {
 
   let response = await doFetch(headers);
 
-  if (response.status === 401) {
-    console.warn(`[wallet] 401 received — refreshing access token for userId=${userId}`);
+  if (response.status === 401 || response.status === 403) {
+    console.warn(`[wallet] ${response.status} received — refreshing access token for userId=${userId}`);
     const newToken = await refreshAccessToken(userId, axiosInstance);
     if (newToken) {
       headers['x-razer-accesstoken'] = newToken;
@@ -160,9 +160,9 @@ async function fetchRazerWalletBalances(userId) {
 
   let [responseSilver, responseGold] = await doFetch(headers);
 
-  // If either call returned 401, refresh token and retry once
-  if (responseSilver.status === 401 || responseGold.status === 401) {
-    console.warn(`[wallet] 401 received — refreshing access token for userId=${userId}`);
+  // If either call returned 401/403, refresh token and retry once
+  if ([401, 403].includes(responseSilver.status) || [401, 403].includes(responseGold.status)) {
+    console.warn(`[wallet] ${responseSilver.status}/${responseGold.status} received — refreshing access token for userId=${userId}`);
     const newToken = await refreshAccessToken(userId, axiosInstance);
     if (newToken) {
       headers['x-razer-accesstoken'] = newToken;
