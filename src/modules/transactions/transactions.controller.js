@@ -3,7 +3,47 @@ const speakeasy = require('speakeasy');
 const RazerPayloadData = require('../auth/razerPayloadData.model');
 const CompletedBatch = require('./completedBatch.model');
 const GoldMultipleAccountBatch = require('./goldMultipleAccountBatch.model');
-const { getAxiosForUser } = require('../../utils/proxyAxios');
+const { getAxiosForUser, PROXY_LIST } = require('../../utils/proxyAxios');
+
+function normalizeProxyPool(rawPool) {
+  if (rawPool === undefined || rawPool === null) {
+    return { ok: true, pool: null };
+  }
+  if (!Array.isArray(rawPool)) {
+    return { ok: false, message: 'proxyPool must be an array' };
+  }
+  if (rawPool.length === 0) {
+    return { ok: true, pool: null };
+  }
+
+  const validIds = new Set(PROXY_LIST.filter((p) => !p.disabled).map((p) => p.id));
+  const seen = new Set();
+  const pool = [];
+
+  for (let i = 0; i < rawPool.length; i += 1) {
+    const entry = rawPool[i];
+    if (entry === null || entry === undefined) {
+      const key = 'null';
+      if (seen.has(key)) continue;
+      seen.add(key);
+      pool.push(null);
+      continue;
+    }
+    const numeric = Number(entry);
+    if (!Number.isInteger(numeric)) {
+      return { ok: false, message: `proxyPool[${i}] must be a proxy id (integer) or null` };
+    }
+    if (!validIds.has(numeric)) {
+      return { ok: false, message: `proxyPool[${i}] references unknown or disabled proxy id ${numeric}` };
+    }
+    const key = `id:${numeric}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    pool.push(numeric);
+  }
+
+  return { ok: true, pool };
+}
 
 function normalizeMode(mode) {
   if (typeof mode !== 'string') {
@@ -189,7 +229,7 @@ const PER_ACCOUNT_CONCURRENCY = 3;
 
 async function startMultiBatch(req, res, next) {
   try {
-    const { transactions, mode } = req.body || {};
+    const { transactions, mode, proxyPool } = req.body || {};
 
     if (!Array.isArray(transactions) || transactions.length === 0) {
       return res.status(400).json({
@@ -258,10 +298,16 @@ async function startMultiBatch(req, res, next) {
       });
     }
 
+    const poolResult = normalizeProxyPool(proxyPool);
+    if (!poolResult.ok) {
+      return res.status(400).json({ success: false, message: poolResult.message });
+    }
+
     const data = transactionsService.startMultiBatch({
       userId: req.userId,
       accounts,
       mode: normalizedMode,
+      proxyPool: poolResult.pool,
     });
 
     return res.status(202).json({

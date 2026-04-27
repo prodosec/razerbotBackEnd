@@ -77,4 +77,30 @@ async function getAxiosForUser(userId) {
   return buildAxiosWithProxy(proxyId);
 }
 
-module.exports = { getAxiosForUser, buildAxiosWithProxy, PROXY_LIST, DEFAULT_PROXY_ID };
+function getAxiosForProxyId(proxyId) {
+  if (proxyId === null || proxyId === undefined) {
+    console.log('[proxy] getAxiosForProxyId proxyId=null — using server IP');
+    return axios;
+  }
+  return buildAxiosWithProxy(proxyId);
+}
+
+function getProxyMeta(proxyId) {
+  if (proxyId === null || proxyId === undefined) {
+    return { id: null, label: 'Server IP', country: null };
+  }
+  const proxy = PROXY_LIST.find((p) => p.id === proxyId);
+  if (!proxy) {
+    return { id: proxyId, label: `Proxy ${proxyId}`, country: null };
+  }
+  return { id: proxy.id, label: proxy.label, country: proxy.country };
+}
+
+module.exports = {
+  getAxiosForUser,
+  getAxiosForProxyId,
+  buildAxiosWithProxy,
+  getProxyMeta,
+  PROXY_LIST,
+  DEFAULT_PROXY_ID,
+};

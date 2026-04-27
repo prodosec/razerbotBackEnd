@@ -3,7 +3,7 @@ const CompletedBatch = require('./completedBatch.model');
 const GoldMultipleAccountBatch = require('./goldMultipleAccountBatch.model');
 const { TransactionsManager, MAX_CONCURRENCY, ALLOWED_MODES } = require('./transactions.manager');
 const RazerPayloadData = require('../auth/razerPayloadData.model');
-const { getAxiosForUser } = require('../../utils/proxyAxios');
+const { getAxiosForUser, getAxiosForProxyId } = require('../../utils/proxyAxios');
 
 const manager = new TransactionsManager();
 
@@ -71,7 +71,7 @@ async function processWithMongoMode({ jobId, userId, itemIndex, payload }) {
   }
 }
 
-async function processWithRazerMode({ userId, itemIndex, payload }) {
+async function processWithRazerMode({ userId, itemIndex, payload, proxyId, slotProxyAssigned }) {
   const tag = `[razer][item ${itemIndex}]`;
 
   console.log(`${tag} ── START ──────────────────────────────`);
@@ -114,8 +114,15 @@ async function processWithRazerMode({ userId, itemIndex, payload }) {
   console.log(`${tag} otp_token (cookie, first 20): ${String(payload.otp_token).slice(0, 20)}...`);
   console.log(`${tag} rawToken (body, 6-digit): ${payload.rawToken}`);
 
-  // Route requests through the owning account's proxy (falls back to job-owner's proxy for single-account).
-  const axiosInstance = await getAxiosForUser(razerPayload.userId || userId);
+  // If the manager assigned a slot proxy, use it for every outbound call (login, balance, OTP,
+  // checkout, retries). Otherwise fall back to the user's currently-configured proxy.
+  let axiosInstance;
+  if (slotProxyAssigned) {
+    console.log(`${tag} Using slot proxy: proxyId=${proxyId === null ? 'null (server IP)' : proxyId}`);
+    axiosInstance = getAxiosForProxyId(proxyId);
+  } else {
+    axiosInstance = await getAxiosForUser(razerPayload.userId || userId);
+  }
 
   // Exact headers matching browser request
   const headers = {
@@ -243,13 +250,13 @@ async function processWithRazerMode({ userId, itemIndex, payload }) {
   };
 }
 
-async function processTransaction({ mode, jobId, userId, itemIndex, payload }) {
+async function processTransaction({ mode, jobId, userId, itemIndex, payload, proxyId, slotProxyAssigned }) {
   if (mode === 'mongodb') {
     return processWithMongoMode({ jobId, userId, itemIndex, payload });
   }
 
   if (mode === 'razer') {
-    return processWithRazerMode({ userId, itemIndex, payload });
+    return processWithRazerMode({ userId, itemIndex, payload, proxyId, slotProxyAssigned });
   }
 
   return processWithFakeMode({ itemIndex, payload });
@@ -273,7 +280,7 @@ async function saveCompletedBatch({ jobId, userId, mode, total, counts, complete
 async function saveCompletedMultiBatch(payload) {
   const {
     jobId, userId, mode, total, counts, completedAt, transactions,
-    accounts, perAccountConcurrency, pausedAccounts, stoppedAccounts,
+    accounts, perAccountConcurrency, pausedAccounts, stoppedAccounts, proxyPool,
   } = payload;
 
   console.log(`[saveCompletedMultiBatch] jobId: ${jobId}, userId: ${userId}, total: ${total}, accounts: ${accounts?.length}, counts:`, counts);
@@ -289,6 +296,7 @@ async function saveCompletedMultiBatch(payload) {
         perAccountConcurrency: perAccountConcurrency || 3,
         pausedAccounts: pausedAccounts || [],
         stoppedAccounts: stoppedAccounts || [],
+        ...(Array.isArray(proxyPool) ? { proxyPool } : {}),
         completedAt,
         transactions,
       },
@@ -315,7 +323,7 @@ function startBatch({ userId, transactions, concurrency, mode }) {
   });
 }
 
-function startMultiBatch({ userId, accounts, mode }) {
+function startMultiBatch({ userId, accounts, mode, proxyPool }) {
   const selectedMode = ALLOWED_MODES.has(mode) ? mode : 'fake';
 
   return manager.createMultiJob({
@@ -323,8 +331,17 @@ function startMultiBatch({ userId, accounts, mode }) {
     accounts,
     perAccountConcurrency: 3,
     mode: selectedMode,
-    processFn: ({ jobId, userId: ownerId, itemIndex, payload }) =>
-      processTransaction({ mode: selectedMode, jobId, userId: ownerId, itemIndex, payload }),
+    proxyPool: proxyPool || null,
+    processFn: ({ jobId, userId: ownerId, itemIndex, payload, proxyId, slotProxyAssigned }) =>
+      processTransaction({
+        mode: selectedMode,
+        jobId,
+        userId: ownerId,
+        itemIndex,
+        payload,
+        proxyId,
+        slotProxyAssigned,
+      }),
     onCompletedFn: saveCompletedMultiBatch,
   });
 }

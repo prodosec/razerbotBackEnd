@@ -11,6 +11,7 @@ const goldMultipleAccountBatchSchema = new mongoose.Schema(
     perAccountConcurrency: { type: Number, default: 3 },
     pausedAccounts: { type: [String], default: [] },
     stoppedAccounts: { type: [String], default: [] },
+    proxyPool: { type: [mongoose.Schema.Types.Mixed], default: undefined },
     completedAt: { type: Date, required: true },
     transactions: { type: [mongoose.Schema.Types.Mixed], default: [] },
   },

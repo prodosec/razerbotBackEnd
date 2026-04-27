@@ -1,5 +1,6 @@
 const crypto = require('crypto');
 const { emitTransactionEvent } = require('./transactions.events');
+const { getProxyMeta } = require('../../utils/proxyAxios');
 
 const MAX_CONCURRENCY = 10;
 const ALLOWED_MODES = new Set(['fake', 'mongodb', 'razer']);
@@ -59,48 +60,66 @@ class TransactionsManager {
     return this.buildPublicJob(job);
   }
 
-  createMultiJob({ userId, accounts, perAccountConcurrency, mode, processFn, onCompletedFn }) {
+  createMultiJob({ userId, accounts, perAccountConcurrency, mode, proxyPool, processFn, onCompletedFn }) {
     const perAccount = Math.max(1, Math.min(MAX_CONCURRENCY, Number(perAccountConcurrency) || 3));
     const normalizedMode = ALLOWED_MODES.has(mode) ? mode : 'fake';
+    const usePool = Array.isArray(proxyPool) && proxyPool.length > 0;
 
     const jobId = crypto.randomUUID();
 
-    // Interleave items across accounts so all accounts start work immediately
-    const perAccountQueues = accounts.map((acct) =>
-      acct.transactions.map((payload, idx) => ({ email: acct.email, payload, accountIdx: idx }))
-    );
+    const accountEmails = accounts.map((a) => a.email);
+    const totalPerAccount = new Map();
+    accounts.forEach((a) => totalPerAccount.set(a.email, a.transactions.length));
+    const activeCountPerAccount = new Map();
+    accountEmails.forEach((email) => activeCountPerAccount.set(email, 0));
 
-    const queue = [];
-    let globalIndex = 0;
-    let anyLeft = true;
-    while (anyLeft) {
-      anyLeft = false;
-      for (const accQueue of perAccountQueues) {
-        if (accQueue.length > 0) {
-          const item = accQueue.shift();
-          queue.push({
-            itemId: `${jobId}-${item.email}-${item.accountIdx}`,
-            index: globalIndex++,
-            accountEmail: item.email,
-            payload: { ...item.payload, email: item.email },
-          });
-          anyLeft = true;
+    // Per-account work queues; the pool scheduler pulls from these directly.
+    const accountQueues = new Map();
+    let totalItems = 0;
+    accounts.forEach((acct) => {
+      const items = acct.transactions.map((payload, idx) => ({
+        itemId: `${jobId}-${acct.email}-${idx}`,
+        index: idx,
+        accountEmail: acct.email,
+        payload: { ...payload, email: acct.email },
+      }));
+      accountQueues.set(acct.email, items);
+      totalItems += items.length;
+    });
+
+    let queue = [];
+    if (!usePool) {
+      // Legacy interleaved scheduling — items ride on the user's currently-set proxy.
+      const perAccountQueues = accounts.map((a) => accountQueues.get(a.email).slice());
+      let globalIndex = 0;
+      let anyLeft = true;
+      while (anyLeft) {
+        anyLeft = false;
+        for (const accQueue of perAccountQueues) {
+          if (accQueue.length > 0) {
+            const item = accQueue.shift();
+            queue.push({ ...item, index: globalIndex++ });
+            anyLeft = true;
+          }
         }
       }
     }
 
-    const activeCountPerAccount = new Map();
-    const totalPerAccount = new Map();
-    const accountEmails = accounts.map((a) => a.email);
-    accountEmails.forEach((email) => activeCountPerAccount.set(email, 0));
-    accounts.forEach((a) => totalPerAccount.set(a.email, a.transactions.length));
+    const slots = usePool
+      ? proxyPool.map((proxyId, slotIndex) => ({
+          slotIndex,
+          proxyId: proxyId === undefined ? null : proxyId,
+          busy: false,
+          currentAccount: null,
+        }))
+      : [];
 
     const job = {
       id: jobId,
       userId,
       mode: normalizedMode,
       status: 'running',
-      concurrency: perAccount * accountEmails.length,
+      concurrency: usePool ? perAccount * slots.length : perAccount * accountEmails.length,
       perAccountConcurrency: perAccount,
       activeCountPerAccount,
       totalPerAccount,
@@ -108,6 +127,12 @@ class TransactionsManager {
       stoppedAccounts: new Set(),
       accounts: accountEmails,
       queue,
+      accountQueues,
+      usePool,
+      proxyPool: usePool ? proxyPool.slice() : null,
+      slots,
+      accountSlot: new Map(),
+      pendingAccounts: usePool ? accountEmails.slice() : [],
       activeCount: 0,
       paused: false,
       stopRequested: false,
@@ -115,9 +140,9 @@ class TransactionsManager {
       updatedAt: new Date(),
       startedAt: new Date(),
       endedAt: null,
-      total: queue.length,
+      total: totalItems,
       counts: {
-        unprocessed: queue.length,
+        unprocessed: totalItems,
         running: 0,
         success: 0,
         reviewing: 0,
@@ -136,7 +161,29 @@ class TransactionsManager {
       message: 'Multi-account batch job started',
       accounts: accountEmails,
       perAccountConcurrency: perAccount,
+      ...(usePool
+        ? {
+            proxyPool: slots.map((s) => ({
+              slotIndex: s.slotIndex,
+              proxyId: s.proxyId,
+              ...getProxyMeta(s.proxyId),
+            })),
+          }
+        : {}),
     });
+
+    if (usePool) {
+      // Announce starting position for accounts that won't get a slot immediately.
+      accountEmails.forEach((email, position) => {
+        if (position >= slots.length) {
+          this.emit(job, 'transactions:account-waiting', {
+            message: `Account ${email} is waiting for a free slot`,
+            email,
+            position,
+          });
+        }
+      });
+    }
 
     this.pump(jobId);
 
@@ -294,17 +341,27 @@ class TransactionsManager {
     job.stoppedAccounts.add(email);
     job.pausedAccounts.delete(email);
 
-    // Drop queued items for this account; in-flight items keep running.
-    const keep = [];
     let cancelled = 0;
-    for (const item of job.queue) {
-      if (item.accountEmail === email) {
-        cancelled += 1;
-      } else {
-        keep.push(item);
+    if (job.usePool) {
+      const accountQueue = job.accountQueues.get(email) || [];
+      cancelled = accountQueue.length;
+      job.accountQueues.set(email, []);
+      job.pendingAccounts = job.pendingAccounts.filter((e) => e !== email);
+      // Release the slot immediately so the next waiting account can take it.
+      if (job.accountSlot.has(email)) {
+        this.releaseSlot(job, email);
       }
+    } else {
+      const keep = [];
+      for (const item of job.queue) {
+        if (item.accountEmail === email) {
+          cancelled += 1;
+        } else {
+          keep.push(item);
+        }
+      }
+      job.queue = keep;
     }
-    job.queue = keep;
     job.counts.unprocessed -= cancelled;
     job.counts.cancelled = (job.counts.cancelled || 0) + cancelled;
     job.updatedAt = new Date();
@@ -339,7 +396,31 @@ class TransactionsManager {
       return;
     }
 
-    if (job.multiAccount) {
+    if (job.multiAccount && job.usePool) {
+      this.assignPendingSlotsToAccounts(job);
+
+      for (const slot of job.slots) {
+        if (!slot.busy || !slot.currentAccount) continue;
+        const email = slot.currentAccount;
+        if (job.pausedAccounts.has(email) || job.stoppedAccounts.has(email)) continue;
+
+        const accountQueue = job.accountQueues.get(email) || [];
+        while (
+          accountQueue.length > 0 &&
+          (job.activeCountPerAccount.get(email) || 0) < job.perAccountConcurrency &&
+          !job.paused &&
+          !job.stopRequested
+        ) {
+          const workItem = accountQueue.shift();
+          job.activeCountPerAccount.set(email, (job.activeCountPerAccount.get(email) || 0) + 1);
+          job.activeCount += 1;
+          job.counts.unprocessed -= 1;
+          job.counts.running += 1;
+          job.updatedAt = new Date();
+          this.processItem(job, { ...workItem, slotIndex: slot.slotIndex, proxyId: slot.proxyId });
+        }
+      }
+    } else if (job.multiAccount) {
       const remaining = [];
       for (const workItem of job.queue) {
         if (job.paused || job.stopRequested) {
@@ -375,16 +456,81 @@ class TransactionsManager {
       }
     }
 
-    if (job.activeCount === 0 && job.queue.length === 0 && !job.stopRequested) {
+    const queueDrained = job.usePool
+      ? Array.from(job.accountQueues.values()).every((q) => q.length === 0)
+      : job.queue.length === 0;
+
+    if (job.activeCount === 0 && queueDrained && !job.stopRequested) {
       this.finalizeCompleted(job);
     }
+  }
+
+  assignPendingSlotsToAccounts(job) {
+    if (!job.usePool) return;
+    // FIFO: walk pendingAccounts in order, give each the first free slot.
+    // Stopped accounts drop out; paused accounts stay pending (no slot).
+    const stillPending = [];
+    for (const email of job.pendingAccounts) {
+      if (job.stoppedAccounts.has(email)) {
+        continue;
+      }
+      if (job.pausedAccounts.has(email)) {
+        stillPending.push(email);
+        continue;
+      }
+      const accountQueue = job.accountQueues.get(email) || [];
+      if (accountQueue.length === 0) {
+        continue;
+      }
+      const freeSlot = job.slots.find((s) => !s.busy);
+      if (!freeSlot) {
+        stillPending.push(email);
+        continue;
+      }
+      freeSlot.busy = true;
+      freeSlot.currentAccount = email;
+      job.accountSlot.set(email, freeSlot.slotIndex);
+      this.emit(job, 'transactions:account-slot-assigned', {
+        message: `Account ${email} assigned to slot ${freeSlot.slotIndex}`,
+        email,
+        slotIndex: freeSlot.slotIndex,
+        proxyId: freeSlot.proxyId,
+        ...getProxyMeta(freeSlot.proxyId),
+        waitingForSlot: false,
+      });
+    }
+    job.pendingAccounts = stillPending;
+  }
+
+  releaseSlot(job, email) {
+    if (!job.usePool) return;
+    const slotIndex = job.accountSlot.get(email);
+    if (slotIndex === undefined) return;
+    const slot = job.slots[slotIndex];
+    if (!slot) return;
+    slot.busy = false;
+    slot.currentAccount = null;
+    job.accountSlot.delete(email);
+    this.emit(job, 'transactions:account-slot-released', {
+      message: `Account ${email} released slot ${slotIndex}`,
+      email,
+      slotIndex,
+      proxyId: slot.proxyId,
+    });
   }
 
   async processItem(job, workItem) {
     const startTime = Date.now();
     const tag = `[manager][job ${job.id.slice(0, 8)}][item ${workItem.index}]`;
+    const slotProxyAssigned = job.usePool && workItem.slotIndex !== undefined;
+    const slotInfo = slotProxyAssigned
+      ? { slotIndex: workItem.slotIndex, proxyId: workItem.proxyId }
+      : {};
 
-    console.log(`${tag} Processing started — mode: ${job.mode}, activeCount: ${job.activeCount}, queueLeft: ${job.queue.length}`);
+    const queueLeft = job.usePool
+      ? Array.from(job.accountQueues.values()).reduce((n, q) => n + q.length, 0)
+      : job.queue.length;
+    console.log(`${tag} Processing started — mode: ${job.mode}, activeCount: ${job.activeCount}, queueLeft: ${queueLeft}${slotProxyAssigned ? `, slot: ${workItem.slotIndex}, proxyId: ${workItem.proxyId}` : ''}`);
 
     try {
       const output = await job.processFn({
@@ -392,6 +538,8 @@ class TransactionsManager {
         userId: job.userId,
         itemIndex: workItem.index,
         payload: workItem.payload,
+        proxyId: slotProxyAssigned ? workItem.proxyId : undefined,
+        slotProxyAssigned,
       });
 
       const itemStatus = output?.transactionStatus === 'reviewing' ? 'reviewing' : 'success';
@@ -400,6 +548,7 @@ class TransactionsManager {
         itemId: workItem.itemId,
         itemIndex: workItem.index,
         ...(job.multiAccount && workItem.accountEmail ? { accountEmail: workItem.accountEmail } : {}),
+        ...slotInfo,
         status: itemStatus,
         processingMs: Date.now() - startTime,
         output,
@@ -418,6 +567,7 @@ class TransactionsManager {
         itemId: workItem.itemId,
         itemIndex: workItem.index,
         ...(job.multiAccount && workItem.accountEmail ? { accountEmail: workItem.accountEmail } : {}),
+        ...slotInfo,
         status: 'failed',
         processingMs: Date.now() - startTime,
         error: err && err.message ? err.message : 'Unknown processing error',
@@ -436,6 +586,16 @@ class TransactionsManager {
       job.updatedAt = new Date();
 
       console.log(`${tag} counts after:`, { ...job.counts });
+
+      // Release slot when this account has drained (no in-flight, no queued).
+      if (job.usePool && workItem.accountEmail) {
+        const email = workItem.accountEmail;
+        const remainingActive = job.activeCountPerAccount.get(email) || 0;
+        const remainingQueue = (job.accountQueues.get(email) || []).length;
+        if (remainingActive === 0 && remainingQueue === 0 && job.accountSlot.has(email)) {
+          this.releaseSlot(job, email);
+        }
+      }
 
       this.emit(job, 'transactions:progress', {
         message: 'Batch progress update',
@@ -466,6 +626,9 @@ class TransactionsManager {
       base.perAccountConcurrency = job.perAccountConcurrency;
       base.pausedAccounts = Array.from(job.pausedAccounts || []);
       base.stoppedAccounts = Array.from(job.stoppedAccounts || []);
+      if (job.usePool) {
+        base.proxyPool = (job.proxyPool || []).slice();
+      }
     }
     return base;
   }
@@ -490,6 +653,18 @@ class TransactionsManager {
   finalizeStopped(job) {
     if (job.queue.length > 0) {
       job.queue.length = 0;
+    }
+    if (job.accountQueues) {
+      for (const q of job.accountQueues.values()) {
+        q.length = 0;
+      }
+    }
+    if (job.usePool && job.slots) {
+      for (const slot of job.slots) {
+        if (slot.busy && slot.currentAccount) {
+          this.releaseSlot(job, slot.currentAccount);
+        }
+      }
     }
 
     job.status = 'stopped';
@@ -549,6 +724,19 @@ class TransactionsManager {
             perAccountConcurrency: job.perAccountConcurrency,
             pausedAccounts: Array.from(job.pausedAccounts || []),
             stoppedAccounts: Array.from(job.stoppedAccounts || []),
+            ...(job.usePool
+              ? {
+                  proxyPool: (job.proxyPool || []).slice(),
+                  slots: (job.slots || []).map((s) => ({
+                    slotIndex: s.slotIndex,
+                    proxyId: s.proxyId,
+                    busy: s.busy,
+                    currentAccount: s.currentAccount,
+                    ...getProxyMeta(s.proxyId),
+                  })),
+                  pendingAccounts: (job.pendingAccounts || []).slice(),
+                }
+              : {}),
           }
         : {}),
     };
