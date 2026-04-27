@@ -1,7 +1,9 @@
 const axios = require('axios');
 const Wallet = require('./wallet.model');
 const RazerPayloadData = require('../auth/razerPayloadData.model');
-const { getAxiosForUser } = require('../../utils/proxyAxios');
+const { getAxiosForUser, getAxiosForProxyId } = require('../../utils/proxyAxios');
+
+const SILVER_PROXY_FALLBACK_IDS = [1, 2];
 
 const DEFAULT_RAZER_GOLD_URL = process.env.RAZER_GOLD_URL || 'https://gold.razer.com/pk/en';
 
@@ -147,12 +149,7 @@ async function fetchGoldBalance(userId) {
   return response.data;
 }
 
-async function fetchRazerWalletBalances(userId) {
-  const [headers, axiosInstance] = await Promise.all([
-    getStoredRazerHeaders(userId),
-    getAxiosForUser(userId),
-  ]);
-
+async function fetchRazerWalletBalancesWith(userId, axiosInstance, headers) {
   const doFetch = (h) => Promise.all([
     axiosInstance.get('https://gold.razer.com/api/silver/wallet', { headers: h, validateStatus: () => true }),
     axiosInstance.get('https://gold.razer.com/api/gold/balance', { headers: h, validateStatus: () => true }),
@@ -176,6 +173,41 @@ async function fetchRazerWalletBalances(userId) {
   return {
     silver: responseSilver.data,
     gold: responseGold.data,
+  };
+}
+
+async function fetchRazerWalletBalances(userId) {
+  // Headers are user-state, not proxy-state — load once and reuse across attempts.
+  // If headers themselves are missing/incomplete, that's a client-side problem; let it propagate.
+  const headers = await getStoredRazerHeaders(userId);
+
+  const attempts = [
+    { label: 'user proxy', build: () => getAxiosForUser(userId) },
+    ...SILVER_PROXY_FALLBACK_IDS.map((id) => ({
+      label: `proxy ${id}`,
+      build: async () => getAxiosForProxyId(id),
+    })),
+  ];
+
+  let lastErr = null;
+  for (const attempt of attempts) {
+    try {
+      const axiosInstance = await attempt.build();
+      // Each attempt needs a fresh header copy so token-refresh mutations don't leak across.
+      const result = await fetchRazerWalletBalancesWith(userId, axiosInstance, { ...headers });
+      return result;
+    } catch (err) {
+      console.warn(`[wallet] silver fetch failed via ${attempt.label}: ${err && err.message ? err.message : err}`);
+      lastErr = err;
+    }
+  }
+
+  console.error(`[wallet] silver fetch exhausted all proxy fallbacks for userId=${userId}`);
+  throw {
+    status: 502,
+    code: 'SILVER_FETCH_FAILED',
+    message: 'Could not fetch wallet balance. Please log in again.',
+    cause: lastErr,
   };
 }
 
