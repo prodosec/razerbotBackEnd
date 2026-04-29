@@ -3,11 +3,16 @@ const http = require('http');
 const app = require('./app');
 const connectDB = require('./db');
 const { initializeSocket } = require('./socket');
+const { loadProxies } = require('./utils/proxyAxios');
+const { seedProxiesIfEmpty } = require('./modules/proxy/proxy.seed');
 
 const PORT = process.env.PORT || 4000;
 
 connectDB()
-  .then(() => {
+  .then(async () => {
+    await seedProxiesIfEmpty();
+    await loadProxies();
+
     const server = http.createServer(app);
     initializeSocket(server);
 
