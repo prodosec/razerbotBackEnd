@@ -4,6 +4,7 @@ const RazerPayloadData = require('../auth/razerPayloadData.model');
 const { getAxiosForUser, getAxiosForProxyId } = require('../../utils/proxyAxios');
 
 const SILVER_PROXY_FALLBACK_IDS = [1, 2];
+const SILVER_DIRECT_AXIOS = axios.create({ timeout: 15000 });
 
 const DEFAULT_RAZER_GOLD_URL = process.env.RAZER_GOLD_URL || 'https://gold.razer.com/pk/en';
 
@@ -182,7 +183,7 @@ async function fetchRazerWalletBalances(userId) {
   const headers = await getStoredRazerHeaders(userId);
 
   const attempts = [
-    { label: 'user proxy', build: () => getAxiosForUser(userId) },
+    { label: 'server IP', build: async () => SILVER_DIRECT_AXIOS },
     ...SILVER_PROXY_FALLBACK_IDS.map((id) => ({
       label: `proxy ${id}`,
       build: async () => getAxiosForProxyId(id),
