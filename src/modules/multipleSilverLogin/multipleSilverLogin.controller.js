@@ -40,14 +40,14 @@ function validateAccounts(accounts) {
 
 async function bulkLoad(req, res, next) {
   try {
-    const { accounts, batchSize } = req.body;
+    const { accounts, batchSize, type } = req.body;
 
     const error = validateAccounts(accounts);
     if (error) return res.status(400).json({ success: false, message: error });
 
     const resolvedBatchSize = batchSize || getAutoBatchSize(accounts.length);
 
-    const result = await loadAccounts(accounts, { batchSize: resolvedBatchSize });
+    const result = await loadAccounts(accounts, { batchSize: resolvedBatchSize, type });
 
     res.json({
       success: true,
@@ -66,7 +66,7 @@ async function bulkLoad(req, res, next) {
 // SSE version — streams live progress to frontend
 async function bulkLoadStream(req, res, next) {
   try {
-    const { accounts, batchSize } = req.body;
+    const { accounts, batchSize, type } = req.body;
 
     const error = validateAccounts(accounts);
     if (error) return res.status(400).json({ success: false, message: error });
@@ -84,6 +84,7 @@ async function bulkLoadStream(req, res, next) {
 
     const result = await loadAccounts(accounts, {
       batchSize: resolvedBatchSize,
+      type,
       onProgress: (account, done, total) => {
         send('progress', { done, total, account });
       },

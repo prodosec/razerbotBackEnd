@@ -48,10 +48,12 @@ async function refreshAccessToken(razerPayload) {
   }
 }
 
-async function loadAccounts(accounts, { batchSize = 20, onProgress } = {}) {
+async function loadAccounts(accounts, { batchSize = 20, onProgress, type } = {}) {
   const results = [];
   const start = Date.now();
-  const proxies = getRotatingProxies(9);
+  // Gold multi-account login uses the server's own IP; silver keeps rotating proxies.
+  const useProxy = type !== 'gold';
+  const proxies = useProxy ? getRotatingProxies(9) : [];
 
   for (let i = 0; i < accounts.length; i += batchSize) {
     const batch = accounts.slice(i, i + batchSize);
@@ -60,7 +62,7 @@ async function loadAccounts(accounts, { batchSize = 20, onProgress } = {}) {
       batch.map((account, batchIdx) => {
         const stagger = batchIdx * 100;
         return new Promise(r => setTimeout(r, stagger))
-          .then(() => loginAndSave(account, assignProxy(i + batchIdx, proxies)));
+          .then(() => loginAndSave(account, useProxy ? assignProxy(i + batchIdx, proxies) : null));
       })
     );
 
