@@ -105,13 +105,20 @@ class TransactionsManager {
       }
     }
 
+    // Sequential per-account processing: a single slot whose proxyId rotates through
+    // the proxyPool cycle each time a new account is assigned. With cycle [null, 1, 2]
+    // and 5 accounts: A → server IP, B → proxy 1, C → proxy 2, D → server IP (wrap),
+    // E → proxy 1 (wrap). One account runs at a time; its full queue completes on the
+    // assigned IP before the next account starts.
     const slots = usePool
-      ? proxyPool.map((proxyId, slotIndex) => ({
-          slotIndex,
-          proxyId: proxyId === undefined ? null : proxyId,
-          busy: false,
-          currentAccount: null,
-        }))
+      ? [
+          {
+            slotIndex: 0,
+            proxyId: proxyPool[0] === undefined ? null : proxyPool[0],
+            busy: false,
+            currentAccount: null,
+          },
+        ]
       : [];
 
     const job = {
@@ -130,6 +137,7 @@ class TransactionsManager {
       accountQueues,
       usePool,
       proxyPool: usePool ? proxyPool.slice() : null,
+      nextProxyIndex: 0,
       slots,
       accountSlot: new Map(),
       pendingAccounts: usePool ? accountEmails.slice() : [],
@@ -163,10 +171,10 @@ class TransactionsManager {
       perAccountConcurrency: perAccount,
       ...(usePool
         ? {
-            proxyPool: slots.map((s) => ({
-              slotIndex: s.slotIndex,
-              proxyId: s.proxyId,
-              ...getProxyMeta(s.proxyId),
+            proxyPool: proxyPool.map((proxyId, cycleIndex) => ({
+              cycleIndex,
+              proxyId: proxyId === undefined ? null : proxyId,
+              ...getProxyMeta(proxyId === undefined ? null : proxyId),
             })),
           }
         : {}),
@@ -487,6 +495,15 @@ class TransactionsManager {
         stillPending.push(email);
         continue;
       }
+
+      // Rotate to the next IP in the cycle for this account. Cycle wraps when accounts
+      // outnumber IPs (e.g. 5 accounts, cycle [null, 1, 2] → null, 1, 2, null, 1).
+      if (job.proxyPool && job.proxyPool.length > 0) {
+        const cycleEntry = job.proxyPool[job.nextProxyIndex % job.proxyPool.length];
+        freeSlot.proxyId = cycleEntry === undefined ? null : cycleEntry;
+        job.nextProxyIndex += 1;
+      }
+
       freeSlot.busy = true;
       freeSlot.currentAccount = email;
       job.accountSlot.set(email, freeSlot.slotIndex);

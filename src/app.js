@@ -6,6 +6,7 @@ const walletRouter = require('./modules/wallet/wallet.routes');
 const transactionsRouter = require('./modules/transactions/transactions.routes');
 const silverRouter = require('./modules/silver/silver.routes');
 const multipleSilverLoginRouter = require('./modules/multipleSilverLogin/multipleSilverLogin.routes');
+const multiAccountHistoryRouter = require('./modules/multiAccountHistory/multiAccountHistory.routes');
 const proxyRouter = require('./modules/proxy/proxy.routes');
 const errorHandler = require('./middleware/errorHandler');
 const cors = require("cors");
@@ -26,6 +27,7 @@ app.use('/api/wallet', walletRouter);
 app.use('/api/transactions', transactionsRouter);
 app.use('/api/silver', silverRouter);
 app.use('/api/multiple-silver-login', multipleSilverLoginRouter);
+app.use('/api/multiple-silver-login', multiAccountHistoryRouter);
 app.use('/api/proxies', proxyRouter);
 
 app.use((req, res, next) => {

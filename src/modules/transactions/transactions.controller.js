@@ -229,7 +229,7 @@ const PER_ACCOUNT_CONCURRENCY = 3;
 
 async function startMultiBatch(req, res, next) {
   try {
-    const { transactions, mode, proxyPool } = req.body || {};
+    const { transactions, mode } = req.body || {};
 
     if (!Array.isArray(transactions) || transactions.length === 0) {
       return res.status(400).json({
@@ -298,16 +298,21 @@ async function startMultiBatch(req, res, next) {
       });
     }
 
-    const poolResult = normalizeProxyPool(proxyPool);
-    if (!poolResult.ok) {
-      return res.status(400).json({ success: false, message: poolResult.message });
-    }
+    // Build the proxy rotation cycle server-side. Accounts are processed one-at-a-time
+    // (not in parallel); each account uses ONE IP for its full run, and when it finishes
+    // the next account takes the next IP in the cycle (wrapping around if accounts > IPs).
+    // Cycle order: server IP first (null), then enabled proxies sorted by id.
+    const enabledProxyIds = PROXY_LIST
+      .filter((p) => !p.disabled)
+      .sort((a, b) => a.id - b.id)
+      .map((p) => p.id);
+    const proxyPool = [null, ...enabledProxyIds];
 
     const data = transactionsService.startMultiBatch({
       userId: req.userId,
       accounts,
       mode: normalizedMode,
-      proxyPool: poolResult.pool,
+      proxyPool,
     });
 
     return res.status(202).json({
