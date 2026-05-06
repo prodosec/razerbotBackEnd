@@ -225,7 +225,7 @@ async function startBatch(req, res, next) {
 }
 
 const MAX_MULTI_ACCOUNTS = 5;
-const PER_ACCOUNT_CONCURRENCY = 3;
+const PER_ACCOUNT_CONCURRENCY = 8;
 
 async function startMultiBatch(req, res, next) {
   try {
@@ -298,9 +298,11 @@ async function startMultiBatch(req, res, next) {
       });
     }
 
-    // Build the proxy rotation cycle server-side. Accounts are processed one-at-a-time
-    // (not in parallel); each account uses ONE IP for its full run, and when it finishes
-    // the next account takes the next IP in the cycle (wrapping around if accounts > IPs).
+    // Build the proxy rotation cycle server-side. Up to two accounts run in parallel:
+    // slot 0 on the server IP (null), slot 1 on the first proxy. If no proxies are
+    // configured, only one slot exists and accounts run one-at-a-time on the server IP.
+    // Each account uses ONE IP for its full run; when it finishes the next account takes
+    // the next IP in the cycle (wrapping around if accounts > IPs).
     // Cycle order: server IP first (null), then enabled proxies sorted by id.
     const enabledProxyIds = PROXY_LIST
       .filter((p) => !p.disabled)

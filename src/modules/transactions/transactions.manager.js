@@ -105,21 +105,28 @@ class TransactionsManager {
       }
     }
 
-    // Sequential per-account processing: a single slot whose proxyId rotates through
-    // the proxyPool cycle each time a new account is assigned. With cycle [null, 1, 2]
-    // and 5 accounts: A → server IP, B → proxy 1, C → proxy 2, D → server IP (wrap),
-    // E → proxy 1 (wrap). One account runs at a time; its full queue completes on the
-    // assigned IP before the next account starts.
-    const slots = usePool
-      ? [
-          {
-            slotIndex: 0,
-            proxyId: proxyPool[0] === undefined ? null : proxyPool[0],
-            busy: false,
-            currentAccount: null,
-          },
-        ]
-      : [];
+    // Two slots run in parallel when at least one proxy exists: slot 0 starts on the
+    // server IP (proxyPool[0] = null) and slot 1 starts on the first proxy
+    // (proxyPool[1]). Each slot's proxyId then rotates through the proxyPool cycle as
+    // new accounts get assigned. If the pool has only the server IP (no proxies), fall
+    // back to a single slot — one account at a time on the server IP.
+    let slots = [];
+    if (usePool) {
+      slots.push({
+        slotIndex: 0,
+        proxyId: proxyPool[0] === undefined ? null : proxyPool[0],
+        busy: false,
+        currentAccount: null,
+      });
+      if (proxyPool.length >= 2) {
+        slots.push({
+          slotIndex: 1,
+          proxyId: proxyPool[1] === undefined ? null : proxyPool[1],
+          busy: false,
+          currentAccount: null,
+        });
+      }
+    }
 
     const job = {
       id: jobId,
@@ -387,6 +394,23 @@ class TransactionsManager {
     return this.buildPublicJob(job);
   }
 
+  logPumpState(job, label) {
+    if (!job.multiAccount) return;
+    const slotsView = job.usePool
+      ? job.slots.map((s) => `slot${s.slotIndex}=${s.busy ? `${s.currentAccount}(proxy:${s.proxyId === null ? 'null' : s.proxyId})` : 'IDLE'}`).join(', ')
+      : 'no-pool';
+    const perAccount = job.accounts.map((email) => {
+      const active = job.activeCountPerAccount.get(email) || 0;
+      const queueLeft = job.usePool
+        ? (job.accountQueues.get(email) || []).length
+        : job.queue.filter((w) => w.accountEmail === email).length;
+      const total = job.totalPerAccount.get(email) || 0;
+      const done = total - queueLeft - active;
+      return `${email}=${done}/${total}(active:${active}, queued:${queueLeft})`;
+    }).join(' | ');
+    console.log(`[pump:${label}][job ${job.id.slice(0, 8)}] slots=[${slotsView}] | accounts: ${perAccount} | pending=[${job.pendingAccounts.join(',')}]`);
+  }
+
   async pump(jobId) {
     const job = this.jobs.get(jobId);
     if (!job) {
@@ -394,6 +418,7 @@ class TransactionsManager {
     }
 
     if (job.stopRequested) {
+      console.log(`[pump:stop-requested][job ${job.id.slice(0, 8)}] activeCount=${job.activeCount}`);
       if (job.activeCount === 0) {
         this.finalizeStopped(job);
       }
@@ -401,10 +426,12 @@ class TransactionsManager {
     }
 
     if (job.paused) {
+      console.log(`[pump:paused][job ${job.id.slice(0, 8)}] paused, skipping`);
       return;
     }
 
     if (job.multiAccount && job.usePool) {
+      this.logPumpState(job, 'enter');
       this.assignPendingSlotsToAccounts(job);
 
       for (const slot of job.slots) {
@@ -507,6 +534,7 @@ class TransactionsManager {
       freeSlot.busy = true;
       freeSlot.currentAccount = email;
       job.accountSlot.set(email, freeSlot.slotIndex);
+      console.log(`[slot-assign][job ${job.id.slice(0, 8)}][acct ${email}] slot=${freeSlot.slotIndex} proxyId=${freeSlot.proxyId === null ? 'null(server-IP)' : freeSlot.proxyId} queueSize=${(job.accountQueues.get(email) || []).length}`);
       this.emit(job, 'transactions:account-slot-assigned', {
         message: `Account ${email} assigned to slot ${freeSlot.slotIndex}`,
         email,
@@ -528,6 +556,7 @@ class TransactionsManager {
     slot.busy = false;
     slot.currentAccount = null;
     job.accountSlot.delete(email);
+    console.log(`[slot-release][job ${job.id.slice(0, 8)}][acct ${email}] slot=${slotIndex} proxyId=${slot.proxyId === null ? 'null(server-IP)' : slot.proxyId} — slot now free for next account`);
     this.emit(job, 'transactions:account-slot-released', {
       message: `Account ${email} released slot ${slotIndex}`,
       email,
@@ -538,7 +567,8 @@ class TransactionsManager {
 
   async processItem(job, workItem) {
     const startTime = Date.now();
-    const tag = `[manager][job ${job.id.slice(0, 8)}][item ${workItem.index}]`;
+    const acctTag = workItem.accountEmail ? `[acct ${workItem.accountEmail}]` : '';
+    const tag = `[manager][job ${job.id.slice(0, 8)}]${acctTag}[item ${workItem.index}]`;
     const slotProxyAssigned = job.usePool && workItem.slotIndex !== undefined;
     const slotInfo = slotProxyAssigned
       ? { slotIndex: workItem.slotIndex, proxyId: workItem.proxyId }
@@ -547,7 +577,7 @@ class TransactionsManager {
     const queueLeft = job.usePool
       ? Array.from(job.accountQueues.values()).reduce((n, q) => n + q.length, 0)
       : job.queue.length;
-    console.log(`${tag} Processing started — mode: ${job.mode}, activeCount: ${job.activeCount}, queueLeft: ${queueLeft}${slotProxyAssigned ? `, slot: ${workItem.slotIndex}, proxyId: ${workItem.proxyId}` : ''}`);
+    console.log(`${tag} Processing started — mode: ${job.mode}, activeCount: ${job.activeCount}, queueLeft: ${queueLeft}${slotProxyAssigned ? `, slot: ${workItem.slotIndex}, proxyId: ${workItem.proxyId === null ? 'null(server-IP)' : workItem.proxyId}` : ''}`);
 
     try {
       const output = await job.processFn({
@@ -578,6 +608,7 @@ class TransactionsManager {
         console.log(`${tag} SUCCESS — ${result.processingMs}ms`);
         job.counts.success += 1;
       }
+      console.log(`[summary] acct=${workItem.accountEmail || 'n/a'} item=${workItem.index} status=${itemStatus} ms=${result.processingMs}${slotProxyAssigned ? ` slot=${workItem.slotIndex} proxyId=${workItem.proxyId === null ? 'null' : workItem.proxyId}` : ''}`);
       this.pushResult(job, result);
     } catch (err) {
       const result = {
@@ -591,6 +622,7 @@ class TransactionsManager {
       };
 
       console.error(`${tag} FAILED — ${result.processingMs}ms — error: ${result.error}`);
+      console.log(`[summary] acct=${workItem.accountEmail || 'n/a'} item=${workItem.index} status=failed ms=${result.processingMs}${slotProxyAssigned ? ` slot=${workItem.slotIndex} proxyId=${workItem.proxyId === null ? 'null' : workItem.proxyId}` : ''} error="${result.error}"`);
       this.pushResult(job, result);
       job.counts.failed += 1;
     } finally {
@@ -604,12 +636,25 @@ class TransactionsManager {
 
       console.log(`${tag} counts after:`, { ...job.counts });
 
+      // Per-account progress: easy to grep `[progress] acct=foo@bar` to see one account's completion rate.
+      if (workItem.accountEmail) {
+        const email = workItem.accountEmail;
+        const total = job.totalPerAccount ? (job.totalPerAccount.get(email) || 0) : 0;
+        const remainingActive = job.activeCountPerAccount.get(email) || 0;
+        const remainingQueue = job.usePool
+          ? (job.accountQueues.get(email) || []).length
+          : job.queue.filter((w) => w.accountEmail === email).length;
+        const done = total - remainingQueue - remainingActive;
+        console.log(`[progress] acct=${email} ${done}/${total} done (active=${remainingActive}, queued=${remainingQueue})`);
+      }
+
       // Release slot when this account has drained (no in-flight, no queued).
       if (job.usePool && workItem.accountEmail) {
         const email = workItem.accountEmail;
         const remainingActive = job.activeCountPerAccount.get(email) || 0;
         const remainingQueue = (job.accountQueues.get(email) || []).length;
         if (remainingActive === 0 && remainingQueue === 0 && job.accountSlot.has(email)) {
+          console.log(`[acct ${email}] account fully drained — releasing slot ${job.accountSlot.get(email)}`);
           this.releaseSlot(job, email);
         }
       }

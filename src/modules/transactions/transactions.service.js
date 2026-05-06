@@ -72,9 +72,11 @@ async function processWithMongoMode({ jobId, userId, itemIndex, payload }) {
 }
 
 async function processWithRazerMode({ userId, itemIndex, payload, proxyId, slotProxyAssigned }) {
-  const tag = `[razer][item ${itemIndex}]`;
+  const acctTag = payload && payload.email ? `[acct ${payload.email}]` : '';
+  const tag = `[razer]${acctTag}[item ${itemIndex}]`;
+  const itemStart = Date.now();
 
-  console.log(`${tag} ── START ──────────────────────────────`);
+  console.log(`${tag} ── START ────────────────────────────── proxyId=${slotProxyAssigned ? (proxyId === null ? 'null(server-IP)' : proxyId) : 'user-default'}`);
   console.log(`${tag} userId:`, userId);
   console.log(`${tag} payload:`, JSON.stringify(payload, null, 2));
 
@@ -156,6 +158,7 @@ async function processWithRazerMode({ userId, itemIndex, payload, proxyId, slotP
   console.log(`${tag} Step 1 — POST checkout to Razer API`);
   console.log(`${tag} Request body:`, JSON.stringify(checkoutBody));
 
+  const checkoutStart = Date.now();
   let checkoutRes;
   try {
     checkoutRes = await axiosInstance.post('https://gold.razer.com/api/webshop/checkout/gold', checkoutBody, {
@@ -163,11 +166,11 @@ async function processWithRazerMode({ userId, itemIndex, payload, proxyId, slotP
       validateStatus: () => true,
     });
   } catch (fetchErr) {
-    console.error(`${tag} ERROR: request to checkout endpoint failed (network/DNS):`, fetchErr.message);
+    console.error(`${tag} ERROR: request to checkout endpoint failed (network/DNS) after ${Date.now() - checkoutStart}ms:`, fetchErr.message);
     throw fetchErr;
   }
 
-  console.log(`${tag} Checkout response status:`, checkoutRes.status);
+  console.log(`${tag} Checkout response received in ${Date.now() - checkoutStart}ms — status:`, checkoutRes.status);
   console.log(`${tag} Checkout response headers:`, checkoutRes.headers);
   if (checkoutRes.status < 200 || checkoutRes.status >= 300) {
     console.error(`${tag} ERROR: Checkout failed with status ${checkoutRes.status}. Body:`, checkoutRes.data);
@@ -191,6 +194,7 @@ async function processWithRazerMode({ userId, itemIndex, payload, proxyId, slotP
   // Step 2: GET transaction result
   console.log(`${tag} Step 2 — GET transaction result for ID: ${transactionId}`);
 
+  const resultStart = Date.now();
   let resultRes;
   try {
     resultRes = await axiosInstance.get(`https://gold.razer.com/api/webshopv2/${transactionId}`, {
@@ -209,11 +213,11 @@ async function processWithRazerMode({ userId, itemIndex, payload, proxyId, slotP
       validateStatus: () => true,
     });
   } catch (fetchErr) {
-    console.error(`${tag} ERROR: request to transaction result endpoint failed (network/DNS):`, fetchErr.message);
+    console.error(`${tag} ERROR: request to transaction result endpoint failed (network/DNS) after ${Date.now() - resultStart}ms:`, fetchErr.message);
     throw fetchErr;
   }
 
-  console.log(`${tag} Transaction result status:`, resultRes.status);
+  console.log(`${tag} Transaction result received in ${Date.now() - resultStart}ms — status:`, resultRes.status);
 
   const resultData = resultRes.data;
 
@@ -229,7 +233,7 @@ async function processWithRazerMode({ userId, itemIndex, payload, proxyId, slotP
   const hasPins = Array.isArray(pins) && pins.length > 0;
 
   if (!hasPins) {
-    console.warn(`${tag} REVIEWING — transaction ${transactionId} has no pins yet`);
+    console.warn(`${tag} REVIEWING — transaction ${transactionId} has no pins yet — totalMs=${Date.now() - itemStart}`);
     return {
       transactionId,
       paymentUrl,
@@ -239,7 +243,7 @@ async function processWithRazerMode({ userId, itemIndex, payload, proxyId, slotP
     };
   }
 
-  console.log(`${tag} ── SUCCESS — pins received (count: ${pins.length}) ─────────────────────────────`);
+  console.log(`${tag} ── SUCCESS — pins received (count: ${pins.length}) — totalMs=${Date.now() - itemStart} ─────────────────────────────`);
 
   return {
     transactionId,
@@ -329,7 +333,7 @@ function startMultiBatch({ userId, accounts, mode, proxyPool }) {
   return manager.createMultiJob({
     userId,
     accounts,
-    perAccountConcurrency: 3,
+    perAccountConcurrency: 8,
     mode: selectedMode,
     proxyPool: proxyPool || null,
     processFn: ({ jobId, userId: ownerId, itemIndex, payload, proxyId, slotProxyAssigned }) =>
