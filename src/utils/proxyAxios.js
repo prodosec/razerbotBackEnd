@@ -39,7 +39,7 @@ function buildAxiosWithProxy(proxyId) {
   const instance = axios.create({
     httpAgent: agent,
     httpsAgent: agent,
-    timeout: 15000,
+    timeout: 60000,
   });
 
   instance.interceptors.response.use(

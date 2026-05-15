@@ -710,25 +710,40 @@ async function redeemSilverOne({ email, rzrotptoken, rzrotptokenTs, otp_token_en
     pinSupplier: 'molap',
   };
 
+  const doRedeem = () => axiosInstance.post('https://gold.razer.com/api/pincodes/redeemOS', body, {
+    headers: {
+      'accept': 'application/json, text/plain, */*',
+      'accept-language': 'en-US,en;q=0.9',
+      'cache-control': 'no-cache',
+      'content-type': 'application/json',
+      'pragma': 'no-cache',
+      'x-razer-accesstoken': razerPayload.xRazerAccessToken,
+      'x-razer-fpid': razerPayload.xRazerFpid || '',
+      'x-razer-razerid': razerPayload.xRazerRazerid || '',
+      'cookie': `${razerPayload.cookieHeader}; _rzrotptoken=${rzrotptoken}; _rzrotptokents=${rzrotptokenTs}; otpToken=${encodeURIComponent(otp_token)}`,
+      'Referer': `https://gold.razer.com/globalzh/en/silver/redeem/summary/${product.permalink || ''}`,
+    },
+    validateStatus: () => true,
+  });
+
+  // Retry up to 2 times on timeout / network errors. Do NOT retry on logical
+  // rejections like wallet-disabled (76011) — those won't change with a retry.
   let redeemRes;
-  try {
-    redeemRes = await axiosInstance.post('https://gold.razer.com/api/pincodes/redeemOS', body, {
-      headers: {
-        'accept': 'application/json, text/plain, */*',
-        'accept-language': 'en-US,en;q=0.9',
-        'cache-control': 'no-cache',
-        'content-type': 'application/json',
-        'pragma': 'no-cache',
-        'x-razer-accesstoken': razerPayload.xRazerAccessToken,
-        'x-razer-fpid': razerPayload.xRazerFpid || '',
-        'x-razer-razerid': razerPayload.xRazerRazerid || '',
-        'cookie': `${razerPayload.cookieHeader}; _rzrotptoken=${rzrotptoken}; _rzrotptokents=${rzrotptokenTs}; otpToken=${encodeURIComponent(otp_token)}`,
-        'Referer': `https://gold.razer.com/globalzh/en/silver/redeem/summary/${product.permalink || ''}`,
-      },
-      validateStatus: () => true,
-    });
-  } catch (err) {
-    return { email, success: false, error: `Redeem request failed: ${err.message}` };
+  let lastErr = null;
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      redeemRes = await doRedeem();
+      lastErr = null;
+      break;
+    } catch (err) {
+      lastErr = err;
+      const retriable = err.code === 'ECONNABORTED' || err.code === 'ETIMEDOUT' || err.code === 'ECONNRESET' || /timeout/i.test(err.message);
+      if (!retriable || attempt === 3) break;
+      await new Promise(r => setTimeout(r, 1000 * attempt));
+    }
+  }
+  if (lastErr) {
+    return { email, success: false, error: `Redeem request failed: ${lastErr.message}` };
   }
 
   if (redeemRes.status !== 200) {
