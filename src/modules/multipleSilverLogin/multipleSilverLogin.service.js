@@ -9,6 +9,21 @@ function getRotatingProxies(count = 3) {
   return active.slice(0, Math.min(count, active.length));
 }
 
+// Razer returns error 70610 "transaction number is not unique" when concurrent redeems on
+// the same session collide and Razer generates a duplicate transaction number. Transient
+// race, safe to retry. Detect it across the shapes Razer may use.
+function isTransactionNotUnique(body) {
+  if (!body) return false;
+  const code = body.code ?? body.errorCode ?? body.error_code ?? body.status;
+  if (String(code) === '70610') return true;
+  try {
+    const s = JSON.stringify(body).toLowerCase();
+    if (s.includes('70610')) return true;
+    if (s.includes('not unique') && s.includes('transaction')) return true;
+  } catch {}
+  return false;
+}
+
 function assignProxy(index, proxies) {
   if (!proxies.length) return null;
   return proxies[index % proxies.length];
@@ -726,24 +741,38 @@ async function redeemSilverOne({ email, rzrotptoken, rzrotptokenTs, otp_token_en
     validateStatus: () => true,
   });
 
-  // Retry up to 2 times on timeout / network errors. Do NOT retry on logical
-  // rejections like wallet-disabled (76011) — those won't change with a retry.
+  // Retry on timeout / network errors AND on Razer error 70610 ("transaction number is not
+  // unique") — a race when concurrent redeems on the same session collide; a fresh POST gets
+  // a fresh transaction number. A small jitter before each attempt de-syncs concurrent
+  // requests. Do NOT retry on logical rejections like wallet-disabled (76011).
   let redeemRes;
   let lastErr = null;
-  for (let attempt = 1; attempt <= 3; attempt++) {
+  for (let attempt = 1; attempt <= 4; attempt++) {
+    const jitter = 50 + Math.floor(Math.random() * 250);
+    await new Promise(r => setTimeout(r, jitter));
     try {
       redeemRes = await doRedeem();
       lastErr = null;
+      if (isTransactionNotUnique(redeemRes.data) && attempt < 4) {
+        const backoff = 150 * attempt + Math.floor(Math.random() * 200);
+        await new Promise(r => setTimeout(r, backoff));
+        continue;
+      }
       break;
     } catch (err) {
       lastErr = err;
       const retriable = err.code === 'ECONNABORTED' || err.code === 'ETIMEDOUT' || err.code === 'ECONNRESET' || /timeout/i.test(err.message);
-      if (!retriable || attempt === 3) break;
+      if (!retriable || attempt === 4) break;
       await new Promise(r => setTimeout(r, 1000 * attempt));
     }
   }
   if (lastErr) {
     return { email, success: false, error: `Redeem request failed: ${lastErr.message}` };
+  }
+
+  // All 4 attempts collided on 70610 — surface a stable, frontend-detectable marker.
+  if (isTransactionNotUnique(redeemRes.data)) {
+    return { email, success: false, error: `TXN_NOT_UNIQUE_70610: transaction number not unique — failed after 4 attempts. Body: ${JSON.stringify(redeemRes.data)}` };
   }
 
   if (redeemRes.status !== 200) {

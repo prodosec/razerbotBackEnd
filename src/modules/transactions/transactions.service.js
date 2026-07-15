@@ -13,6 +13,21 @@ function wait(ms) {
   });
 }
 
+// Razer returns error 70610 "transaction number is not unique" when several concurrent
+// checkouts on the same session collide and Razer generates a duplicate transaction number.
+// It is a transient race, safe to retry. Detect it across the shapes Razer may use.
+function isTransactionNotUnique(body) {
+  if (!body) return false;
+  const code = body.code ?? body.errorCode ?? body.error_code ?? body.status;
+  if (String(code) === '70610') return true;
+  try {
+    const s = JSON.stringify(body).toLowerCase();
+    if (s.includes('70610')) return true;
+    if (s.includes('not unique') && s.includes('transaction')) return true;
+  } catch {}
+  return false;
+}
+
 async function processWithFakeMode({ itemIndex, payload }) {
   const latency = 200 + Math.floor(Math.random() * 900);
   await wait(latency);
@@ -155,37 +170,69 @@ async function processWithRazerMode({ userId, itemIndex, payload, proxyId, slotP
     ...(payload.email ? { email: payload.email } : {}),
   };
 
-  console.log(`${tag} Step 1 — POST checkout to Razer API`);
-  console.log(`${tag} Request body:`, JSON.stringify(checkoutBody));
+  // Step 1: POST checkout — retry on Razer error 70610 ("transaction number is not unique"),
+  // a race when concurrent checkouts on the same session collide. A fresh POST gets a fresh
+  // transaction number, so retrying resolves it. A small jitter before each attempt de-syncs
+  // concurrent requests to make the collision far less likely in the first place.
+  const MAX_CHECKOUT_ATTEMPTS = 4;
+  let checkoutResponse;
+  let transactionId;
+  let paymentUrl;
 
-  const checkoutStart = Date.now();
-  let checkoutRes;
-  try {
-    checkoutRes = await axiosInstance.post('https://gold.razer.com/api/webshop/checkout/gold', checkoutBody, {
-      headers,
-      validateStatus: () => true,
-    });
-  } catch (fetchErr) {
-    console.error(`${tag} ERROR: request to checkout endpoint failed (network/DNS) after ${Date.now() - checkoutStart}ms:`, fetchErr.message);
-    throw fetchErr;
-  }
+  for (let attempt = 1; attempt <= MAX_CHECKOUT_ATTEMPTS; attempt++) {
+    const jitter = 50 + Math.floor(Math.random() * 250);
+    await wait(jitter);
 
-  console.log(`${tag} Checkout response received in ${Date.now() - checkoutStart}ms — status:`, checkoutRes.status);
-  console.log(`${tag} Checkout response headers:`, checkoutRes.headers);
-  if (checkoutRes.status < 200 || checkoutRes.status >= 300) {
-    console.error(`${tag} ERROR: Checkout failed with status ${checkoutRes.status}. Body:`, checkoutRes.data);
-    throw new Error(`Checkout failed with status ${checkoutRes.status}. Body: ${JSON.stringify(checkoutRes.data)}`);
-  }
+    console.log(`${tag} Step 1 — POST checkout to Razer API (attempt ${attempt}/${MAX_CHECKOUT_ATTEMPTS}, jitter ${jitter}ms)`);
+    console.log(`${tag} Request body:`, JSON.stringify(checkoutBody));
 
-  // Checkout returns 200 with JSON body containing transactionNumber and paymentUrl
-  const checkoutResponse = checkoutRes.data;
-  console.log(`${tag} Checkout response body:`, checkoutResponse);
+    const checkoutStart = Date.now();
+    let checkoutRes;
+    try {
+      checkoutRes = await axiosInstance.post('https://gold.razer.com/api/webshop/checkout/gold', checkoutBody, {
+        headers,
+        validateStatus: () => true,
+      });
+    } catch (fetchErr) {
+      console.error(`${tag} ERROR: request to checkout endpoint failed (network/DNS) after ${Date.now() - checkoutStart}ms:`, fetchErr.message);
+      throw fetchErr;
+    }
 
-  const transactionId = checkoutResponse.transactionNumber;
-  const paymentUrl = checkoutResponse.paymentUrl;
+    console.log(`${tag} Checkout response received in ${Date.now() - checkoutStart}ms — status:`, checkoutRes.status);
+    console.log(`${tag} Checkout response headers:`, checkoutRes.headers);
 
-  if (!transactionId) {
-    throw new Error(`Checkout response missing transactionNumber. Body: ${JSON.stringify(checkoutResponse)}`);
+    const body = checkoutRes.data;
+
+    // Retry only the 70610 collision — everything else falls through to the normal handling.
+    if (isTransactionNotUnique(body)) {
+      if (attempt < MAX_CHECKOUT_ATTEMPTS) {
+        const backoff = 150 * attempt + Math.floor(Math.random() * 200);
+        console.warn(`${tag} RETRY: Razer error 70610 (transaction number not unique) on attempt ${attempt}/${MAX_CHECKOUT_ATTEMPTS} — retrying after ${backoff}ms. Body:`, body);
+        await wait(backoff);
+        continue;
+      }
+      // All attempts collided — surface a stable, frontend-detectable marker.
+      console.error(`${tag} ERROR: transaction number not unique (70610) after ${MAX_CHECKOUT_ATTEMPTS} attempts. Body:`, body);
+      throw new Error(`TXN_NOT_UNIQUE_70610: transaction number not unique — failed after ${MAX_CHECKOUT_ATTEMPTS} attempts. Body: ${JSON.stringify(body)}`);
+    }
+
+    if (checkoutRes.status < 200 || checkoutRes.status >= 300) {
+      console.error(`${tag} ERROR: Checkout failed with status ${checkoutRes.status}. Body:`, body);
+      throw new Error(`Checkout failed with status ${checkoutRes.status}. Body: ${JSON.stringify(body)}`);
+    }
+
+    // Checkout returns 200 with JSON body containing transactionNumber and paymentUrl
+    checkoutResponse = body;
+    console.log(`${tag} Checkout response body:`, checkoutResponse);
+
+    transactionId = checkoutResponse.transactionNumber;
+    paymentUrl = checkoutResponse.paymentUrl;
+
+    if (!transactionId) {
+      throw new Error(`Checkout response missing transactionNumber. Body: ${JSON.stringify(checkoutResponse)}`);
+    }
+
+    break; // checkout succeeded — exit retry loop
   }
 
   console.log(`${tag} transactionNumber:`, transactionId);
