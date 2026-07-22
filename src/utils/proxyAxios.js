@@ -71,15 +71,6 @@ async function getAxiosForUser(userId) {
   return buildAxiosWithProxy(proxyId);
 }
 
-async function getProxyCountryForUser(userId) {
-  const mongoose = require('mongoose');
-  const User = mongoose.model('RegisteredUser');
-  const user = await User.findById(userId).select('proxyId').lean();
-  const proxyId = user?.proxyId ?? null;
-  if (proxyId === null || proxyId === undefined) return null;
-  return PROXY_LIST.find((p) => p.id === proxyId)?.country || null;
-}
-
 function getAxiosForProxyId(proxyId) {
   if (proxyId === null || proxyId === undefined) {
     console.log('[proxy] getAxiosForProxyId proxyId=null — using server IP');
@@ -101,7 +92,6 @@ function getProxyMeta(proxyId) {
 
 module.exports = {
   getAxiosForUser,
-  getProxyCountryForUser,
   getAxiosForProxyId,
   buildAxiosWithProxy,
   getProxyMeta,
